@@ -1,0 +1,14 @@
+{
+  "audioDimensions": 768,
+  "backend": "MLX · Apple Silicon",
+  "blueScore": 0.5985512733459473,
+  "clips": 2,
+  "imageDimensions": 768,
+  "indexedClips": 2,
+  "model": "/Users/apple/.cache/huggingface/hub/models--unsloth--embeddinggemma-2/snapshots/c8f89cc7ecb4ba5122cd15fdd487422b2b487daf",
+  "ok": true,
+  "python": "/Users/apple/.unsloth/studio/unsloth_studio/bin/python",
+  "redScore": 0.7077016830444336,
+  "textDimensions": 768,
+  "test_scope": "Synthetic red and blue videos and sine-wave audio; functional verification, not a retrieval benchmark."
+}

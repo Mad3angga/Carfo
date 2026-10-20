@@ -1,0 +1,9 @@
+{
+  "include": [
+    "Sources",
+    "scripts"
+  ],
+  "venvPath": "/Users/apple/.unsloth/studio",
+  "venv": "unsloth_studio",
+  "reportMissingImports": "none"
+}
