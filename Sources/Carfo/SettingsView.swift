@@ -49,7 +49,7 @@ struct MenuBarView: View {
                 HStack(spacing: 12) {
                     CarfoAppLogo(size: 40)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Footage")
+                        Text("Carfo")
                             .font(CarfoDesign.font(16, weight: .semibold))
                             .foregroundStyle(Color.primary)
                         Text("Pencarian footage di Mac")
@@ -172,7 +172,7 @@ struct MenuBarView: View {
                 menuAction("Pengaturan...", symbol: "switch.2", key: "⌘ ,") {
                     model.showSettings?()
                 }
-                menuAction("Keluar dari Footage", symbol: "power", key: "⌘ Q") {
+                menuAction("Keluar dari Carfo", symbol: "power", key: "⌘ Q") {
                     NSApp.terminate(nil)
                 }
             }
@@ -551,7 +551,6 @@ struct SettingsView: View {
 
                 // Footer
                 HStack {
-                    Label("Seluruh pemrosesan berjalan di Mac ini", systemImage: "internaldrive")
                     Spacer()
                     Text("Carfo 1.0")
                 }

@@ -2,6 +2,7 @@ import AppKit
 import AVKit
 import CarfoCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 extension Notification.Name {
     static let carfoFocusSearch = Notification.Name("CarfoFocusSearch")
@@ -37,6 +38,7 @@ struct SearchView: View {
             }
             .padding(.horizontal, 20)
             .frame(height: 54)
+            .background(WindowDragBackground())
             .modifier(SearchBarSurface())
 
             if expanded {
@@ -298,9 +300,19 @@ struct SearchView: View {
         .onKeyPress(.downArrow) { model.moveSelection(1); return .handled }
         .onKeyPress(.space) { model.togglePreview(); return .handled }
     }
+    private func thumbnailImage(for clip: FootageClip) -> NSImage? {
+        if clip.isImage, let img = NSImage(contentsOf: clip.url) {
+            return img
+        }
+        if let thumbnail = clip.thumbnail {
+            return NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail))
+        }
+        return nil
+    }
     private func dialoguePreview(_ selected: SearchResult) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            MoviePreview(player: model.player)
+        let thumbImage = thumbnailImage(for: selected.clip)
+        return VStack(alignment: .leading, spacing: 12) {
+            MoviePreview(player: model.player, fileURL: selected.clip.url, thumbnail: thumbImage)
                 .frame(maxWidth: .infinity)
                 .frame(height: 184)
                 .background(Color.black, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -311,9 +323,9 @@ struct SearchView: View {
                 )
                 .accessibilityLabel("Pratinjau \(selected.clip.name)")
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(selected.clip.name)
-                    .font(CarfoDesign.font(15, weight: .semibold))
+                    .font(CarfoDesign.font(14, weight: .semibold))
                     .lineLimit(1)
                 HStack(spacing: 6) {
                     Image(systemName: "folder").font(.system(size: 11))
@@ -322,6 +334,12 @@ struct SearchView: View {
                         .lineLimit(1)
                 }.foregroundStyle(CarfoDesign.secondary)
             }
+            .contentShape(Rectangle())
+            .onDrag({
+                makeDragItemProvider(for: selected.clip.url, thumbnail: thumbImage)
+            }, preview: {
+                DragItemPreview(name: selected.clip.name, iconName: "film", thumbnail: thumbImage)
+            })
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -378,38 +396,58 @@ struct SearchView: View {
                     }
                 }
             }
-            Spacer(minLength: 0)
+            HStack(spacing: 8) {
+                Button { model.togglePreview() } label: { Label(model.isPlaying ? "Jeda preview" : "Putar preview", systemImage: model.isPlaying ? "pause.fill" : "play.fill").font(CarfoDesign.font(10)) }.buttonStyle(.link).tint(CarfoDesign.accent)
+                Spacer()
+                Button { model.openSelected() } label: { HStack(spacing: 9) { Text("Buka footage"); Text("↵").opacity(0.85) }.font(CarfoDesign.font(11, weight: .medium)) }
+                    .buttonStyle(.borderedProminent).controlSize(.small)
+            }
         }
     }
+    @ViewBuilder
+    private func imagePreviewView(_ selected: SearchResult, thumbImage: NSImage?) -> some View {
+        if let nsImage = NSImage(contentsOf: selected.clip.url) {
+            Image(nsImage: nsImage)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: .infinity).frame(height: 174)
+                .background(.black, in: RoundedRectangle(cornerRadius: 6))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .accessibilityLabel("Pratinjau \(selected.clip.name)")
+        } else if let thumbImage {
+            Image(nsImage: thumbImage)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: .infinity).frame(height: 174)
+                .background(.black, in: RoundedRectangle(cornerRadius: 6))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .accessibilityLabel("Pratinjau \(selected.clip.name)")
+        } else {
+            Image(systemName: "photo")
+                .font(.system(size: 40))
+                .foregroundStyle(CarfoDesign.secondary)
+                .frame(maxWidth: .infinity).frame(height: 174)
+                .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
     private func preview(_ selected: SearchResult) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let thumbImage = thumbnailImage(for: selected.clip)
+        let mediaIcon: String = selected.clip.isImage ? "photo" : selected.clip.isAudio ? "waveform" : "film"
+
+        return VStack(alignment: .leading, spacing: 10) {
             if selected.clip.isImage {
-                // Image preview: show the actual image
-                if let nsImage = NSImage(contentsOf: selected.clip.url) {
-                    Image(nsImage: nsImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity).frame(height: 174)
-                        .background(.black, in: RoundedRectangle(cornerRadius: 6))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .accessibilityLabel("Pratinjau \(selected.clip.name)")
-                } else if let thumbnail = selected.clip.thumbnail, let thumbImage = NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail)) {
-                    Image(nsImage: thumbImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity).frame(height: 174)
-                        .background(.black, in: RoundedRectangle(cornerRadius: 6))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .accessibilityLabel("Pratinjau \(selected.clip.name)")
-                } else {
-                    Image(systemName: "photo")
-                        .font(.system(size: 40))
-                        .foregroundStyle(CarfoDesign.secondary)
-                        .frame(maxWidth: .infinity).frame(height: 174)
-                        .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
-                }
+                // Image preview: show the actual image and make it draggable
+                imagePreviewView(selected, thumbImage: thumbImage)
+                    .contentShape(Rectangle())
+                    .onDrag({
+                        makeDragItemProvider(for: selected.clip.url, thumbnail: thumbImage)
+                    }, preview: {
+                        DragItemPreview(name: selected.clip.name, iconName: mediaIcon, thumbnail: thumbImage)
+                    })
+                    .help("Klik & tarik gambar ini ke mana saja")
             } else if selected.clip.isAudio {
-                // Audio preview: waveform icon with playback controls
+                // Audio preview: waveform icon with draggable surface
                 VStack(spacing: 12) {
                     Image(systemName: "waveform.circle.fill")
                         .font(.system(size: 48, weight: .light))
@@ -428,18 +466,34 @@ struct SearchView: View {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
                 )
+                .contentShape(Rectangle())
                 .accessibilityLabel("Pratinjau audio \(selected.clip.name)")
+                .onDrag({
+                    makeDragItemProvider(for: selected.clip.url, thumbnail: nil)
+                }, preview: {
+                    DragItemPreview(name: selected.clip.name, iconName: mediaIcon, thumbnail: nil)
+                })
+                .help("Klik & tarik audio ini ke mana saja")
             } else {
-                // Video preview
-                MoviePreview(player: model.player)
+                // Video preview: clean and directly draggable
+                MoviePreview(player: model.player, fileURL: selected.clip.url, thumbnail: thumbImage)
                     .frame(maxWidth: .infinity).frame(height: 174)
                     .background(.black, in: RoundedRectangle(cornerRadius: 6)).clipShape(RoundedRectangle(cornerRadius: 6))
                     .accessibilityLabel("Pratinjau \(selected.clip.name)")
             }
-            VStack(alignment: .leading, spacing: 5) {
+
+            // File info
+            VStack(alignment: .leading, spacing: 3) {
                 Text(selected.clip.name).font(CarfoDesign.font(13, weight: .semibold)).lineLimit(1).help(selected.clip.name)
                 Text(selected.clip.relativePath).font(CarfoDesign.font(10)).foregroundStyle(CarfoDesign.secondary).lineLimit(1).help(selected.clip.path)
             }
+            .contentShape(Rectangle())
+            .onDrag({
+                makeDragItemProvider(for: selected.clip.url, thumbnail: thumbImage)
+            }, preview: {
+                DragItemPreview(name: selected.clip.name, iconName: mediaIcon, thumbnail: thumbImage)
+            })
+
             HStack(spacing: 10) {
                 if selected.clip.isImage {
                     Text("\(selected.clip.width) × \(selected.clip.height)")
@@ -453,8 +507,10 @@ struct SearchView: View {
                     Text(selected.segment.map { "\(timecode($0.start))–\(timecode($0.end))" } ?? timecode(selected.clip.duration))
                 }
             }.font(CarfoDesign.font(10)).foregroundStyle(CarfoDesign.secondary).lineLimit(1).minimumScaleFactor(0.85)
+
             Spacer(minLength: 0)
-            HStack {
+
+            HStack(spacing: 8) {
                 if !selected.clip.isImage {
                     Button { model.togglePreview() } label: { Label(model.isPlaying ? "Jeda preview" : "Putar preview", systemImage: model.isPlaying ? "pause.fill" : "play.fill").font(CarfoDesign.font(10)) }.buttonStyle(.link).tint(CarfoDesign.accent)
                 }
@@ -488,16 +544,113 @@ struct SearchView: View {
     }
 }
 
+final class DraggablePlayerView: AVPlayerView, NSDraggingSource {
+    var fileURL: URL?
+    var thumbnail: NSImage?
+    private var mouseDownPoint: NSPoint?
+    private var isDragging = false
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        .copy
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let localPoint = convert(point, from: superview)
+        guard bounds.contains(localPoint) else { return nil }
+
+        // If clicking on the inline controls bar (bottom ~38pt), let controls receive click
+        if localPoint.y <= 38 {
+            if let controlSubview = super.hitTest(point), controlSubview !== self {
+                return controlSubview
+            }
+        }
+        // In the main video area, return self so DraggablePlayerView controls dragging
+        return self
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownPoint = event.locationInWindow
+        isDragging = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !isDragging, let start = mouseDownPoint, let url = fileURL else {
+            super.mouseDragged(with: event)
+            return
+        }
+
+        let current = event.locationInWindow
+        let distance = hypot(current.x - start.x, current.y - start.y)
+        if distance > 4 {
+            isDragging = true
+            mouseDownPoint = nil
+
+            let draggingItem = NSDraggingItem(pasteboardWriter: url as NSURL)
+            let dragSize = NSSize(width: 80, height: 50)
+            let dragImage = thumbnail ?? snapshot()
+            let mouseLocation = convert(event.locationInWindow, from: nil)
+            let dragFrame = NSRect(
+                x: mouseLocation.x - dragSize.width / 2,
+                y: mouseLocation.y - dragSize.height / 2,
+                width: dragSize.width,
+                height: dragSize.height
+            )
+            draggingItem.setDraggingFrame(dragFrame, contents: dragImage)
+            beginDraggingSession(with: [draggingItem], event: event, source: self)
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if !isDragging && mouseDownPoint != nil {
+            mouseDownPoint = nil
+            // Single click toggles play/pause on the video
+            if let player = player {
+                if player.timeControlStatus == .playing {
+                    player.pause()
+                } else {
+                    player.play()
+                }
+            }
+        }
+        isDragging = false
+        super.mouseUp(with: event)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        isDragging = false
+    }
+
+    private func snapshot() -> NSImage {
+        let image = NSImage(size: bounds.size)
+        image.lockFocus()
+        draw(bounds)
+        image.unlockFocus()
+        return image
+    }
+}
+
 private struct MoviePreview: NSViewRepresentable {
     let player: AVPlayer
-    func makeNSView(context: Context) -> AVPlayerView {
-        let view = AVPlayerView()
+    var fileURL: URL? = nil
+    var thumbnail: NSImage? = nil
+
+    func makeNSView(context: Context) -> DraggablePlayerView {
+        let view = DraggablePlayerView()
         view.player = player
+        view.fileURL = fileURL
+        view.thumbnail = thumbnail
         view.controlsStyle = .inline
         view.showsFullScreenToggleButton = false
         return view
     }
-    func updateNSView(_ view: AVPlayerView, context: Context) { view.player = player }
+
+    func updateNSView(_ view: DraggablePlayerView, context: Context) {
+        view.player = player
+        view.fileURL = fileURL
+        view.thumbnail = thumbnail
+    }
 }
 
 private struct DialogResultRow: View {
@@ -506,59 +659,77 @@ private struct DialogResultRow: View {
     private var selected: Bool { model.selectedID == result.id }
 
     var body: some View {
-        Button {
-            model.select(result.id)
-        } label: {
-            HStack(alignment: .top, spacing: 14) {
-                Text(timecode(result.matchedCue?.start ?? result.segment?.start ?? 0))
-                    .font(CarfoDesign.font(13.5, weight: .bold))
-                    .foregroundStyle(selected ? Color.white : CarfoDesign.action)
-                    .frame(width: 46, alignment: .leading)
+        let thumbImage: NSImage? = {
+            if let thumbnail = result.clip.thumbnail { return NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail)) }
+            return nil
+        }()
 
-                VStack(alignment: .leading, spacing: 3) {
-                    if let cue = result.matchedCue {
-                        Text("“\(cue.text)”")
-                            .font(CarfoDesign.font(12.5, weight: .regular))
-                            .foregroundStyle(selected ? Color.white : Color.primary)
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Text(result.clip.name)
-                            .font(CarfoDesign.font(12, weight: .medium))
-                            .foregroundStyle(selected ? Color.white : Color.primary)
-                            .lineLimit(1)
-                        Text("Belum ditranskrip")
-                            .font(CarfoDesign.font(10))
-                            .foregroundStyle(selected ? Color.white.opacity(0.85) : CarfoDesign.secondary)
-                    }
+        HStack(alignment: .top, spacing: 14) {
+            Text(timecode(result.matchedCue?.start ?? result.segment?.start ?? 0))
+                .font(CarfoDesign.font(13.5, weight: .bold))
+                .foregroundStyle(selected ? Color.white : CarfoDesign.action)
+                .frame(width: 46, alignment: .leading)
 
-                    if result.matchedCue != nil {
-                        Text(result.clip.name)
-                            .font(CarfoDesign.font(11))
-                            .foregroundStyle(selected ? Color.white.opacity(0.85) : CarfoDesign.secondary)
-                            .lineLimit(1)
-                    }
+            VStack(alignment: .leading, spacing: 3) {
+                if let cue = result.matchedCue {
+                    Text("“\(cue.text)”")
+                        .font(CarfoDesign.font(12.5, weight: .regular))
+                        .foregroundStyle(selected ? Color.white : Color.primary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(result.clip.name)
+                        .font(CarfoDesign.font(12, weight: .medium))
+                        .foregroundStyle(selected ? Color.white : Color.primary)
+                        .lineLimit(1)
+                        .onDrag({
+                            makeDragItemProvider(for: result.clip.url, thumbnail: thumbImage)
+                        }, preview: {
+                            DragItemPreview(name: result.clip.name, iconName: "film", thumbnail: thumbImage)
+                        })
+                    Text("Belum ditranskrip")
+                        .font(CarfoDesign.font(10))
+                        .foregroundStyle(selected ? Color.white.opacity(0.85) : CarfoDesign.secondary)
                 }
 
-                Spacer(minLength: 4)
-
-                if selected {
-                    Image(systemName: "return")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.white)
-                        .padding(.top, 2)
+                if result.matchedCue != nil {
+                    Text(result.clip.name)
+                        .font(CarfoDesign.font(11))
+                        .foregroundStyle(selected ? Color.white.opacity(0.85) : CarfoDesign.secondary)
+                        .lineLimit(1)
+                        .onDrag({
+                            makeDragItemProvider(for: result.clip.url, thumbnail: thumbImage)
+                        }, preview: {
+                            DragItemPreview(name: result.clip.name, iconName: "film", thumbnail: thumbImage)
+                        })
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(selected ? CarfoDesign.action : Color.clear)
-            )
-            .contentShape(Rectangle())
+
+            Spacer(minLength: 4)
+
+            if selected {
+                Image(systemName: "return")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.white)
+                    .padding(.top, 2)
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(selected ? CarfoDesign.action : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            model.select(result.id)
+        }
+        .onDrag({
+            makeDragItemProvider(for: result.clip.url, thumbnail: thumbImage)
+        }, preview: {
+            DragItemPreview(name: result.clip.name, iconName: "film", thumbnail: thumbImage)
+        })
         .contextMenu {
             Button("Buka footage") { model.select(result.id); model.openSelected() }
             Button("Tampilkan di Finder") { model.select(result.id); model.revealSelected() }
@@ -582,56 +753,72 @@ private struct ResultRow: View {
         }
     }
     var body: some View {
-        Button { model.select(result.id) } label: {
-            HStack(spacing: 9) {
-                if result.clip.isImage {
-                    // Show actual image thumbnail for image files
-                    if let thumbnail = result.clip.thumbnail, let image = NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail)) {
-                        Image(nsImage: image).resizable().aspectRatio(contentMode: .fill).frame(width: 48, height: 32).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
-                    } else if let image = NSImage(contentsOf: result.clip.url) {
-                        Image(nsImage: image).resizable().aspectRatio(contentMode: .fill).frame(width: 48, height: 32).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
-                    } else {
-                        Image(systemName: "photo").frame(width: 48, height: 32).background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
-                    }
-                } else if result.clip.isAudio {
-                    // Show waveform icon for audio files
-                    Image(systemName: "waveform")
-                        .font(.system(size: 14))
-                        .foregroundStyle(selected ? Color.white : CarfoDesign.accent)
-                        .frame(width: 48, height: 32)
-                        .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
+        let thumbImage: NSImage? = {
+            if result.clip.isImage, let img = NSImage(contentsOf: result.clip.url) { return img }
+            if let thumbnail = result.clip.thumbnail { return NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail)) }
+            return nil
+        }()
+
+        HStack(spacing: 9) {
+            if result.clip.isImage {
+                // Show actual image thumbnail for image files
+                if let thumbnail = result.clip.thumbnail, let image = NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail)) {
+                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill).frame(width: 48, height: 32).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
+                } else if let image = NSImage(contentsOf: result.clip.url) {
+                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill).frame(width: 48, height: 32).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
                 } else {
-                    // Video thumbnail
-                    if let thumbnail = result.clip.thumbnail, let image = NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail)) {
-                        Image(nsImage: image).resizable().aspectRatio(contentMode: .fill).frame(width: 48, height: 32).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
+                    Image(systemName: "photo").frame(width: 48, height: 32).background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
+                }
+            } else if result.clip.isAudio {
+                // Show waveform icon for audio files
+                Image(systemName: "waveform")
+                    .font(.system(size: 14))
+                    .foregroundStyle(selected ? Color.white : CarfoDesign.accent)
+                    .frame(width: 48, height: 32)
+                    .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
+            } else {
+                // Video thumbnail
+                if let thumbnail = result.clip.thumbnail, let image = NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail)) {
+                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill).frame(width: 48, height: 32).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
+                } else {
+                    Image(systemName: "film").frame(width: 48, height: 32).background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
+                }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(result.clip.name)
+                    .font(CarfoDesign.font(11, weight: .medium))
+                    .lineLimit(1)
+                    .onDrag({
+                        makeDragItemProvider(for: result.clip.url, thumbnail: thumbImage)
+                    }, preview: {
+                        DragItemPreview(name: result.clip.name, iconName: mediaIcon, thumbnail: thumbImage)
+                    })
+                HStack(spacing: 4) {
+                    if result.clip.isImage {
+                        Text("\(result.clip.width)×\(result.clip.height) · \(model.library.folders.first { $0.id == result.clip.folderID }?.name ?? "Lokal")")
+                    } else if result.clip.isAudio {
+                        Text("\(timecode(result.segment?.start ?? 0))–\(timecode(result.segment?.end ?? result.clip.duration)) · \(model.library.folders.first { $0.id == result.clip.folderID }?.name ?? "Lokal")")
                     } else {
-                        Image(systemName: "film").frame(width: 48, height: 32).background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
+                        Text("\(timecode(result.segment?.start ?? 0))–\(timecode(result.segment?.end ?? result.clip.duration)) · \(model.library.folders.first { $0.id == result.clip.folderID }?.name ?? "Lokal")")
                     }
                 }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(result.clip.name).font(CarfoDesign.font(11, weight: .medium)).lineLimit(1)
-                    HStack(spacing: 4) {
-                        if result.clip.isImage {
-                            Text("\(result.clip.width)×\(result.clip.height) · \(model.library.folders.first { $0.id == result.clip.folderID }?.name ?? "Lokal")")
-                        } else if result.clip.isAudio {
-                            Text("\(timecode(result.segment?.start ?? 0))–\(timecode(result.segment?.end ?? result.clip.duration)) · \(model.library.folders.first { $0.id == result.clip.folderID }?.name ?? "Lokal")")
-                        } else {
-                            Text("\(timecode(result.segment?.start ?? 0))–\(timecode(result.segment?.end ?? result.clip.duration)) · \(model.library.folders.first { $0.id == result.clip.folderID }?.name ?? "Lokal")")
-                        }
-                    }
-                    .font(CarfoDesign.font(9)).lineLimit(1).opacity(selected ? 0.9 : 0.75)
-                }
-                Spacer(minLength: 0)
-                if selected { Image(systemName: "return").font(.system(size: 10)) }
-            }.padding(.horizontal, 7).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading)
-                .foregroundStyle(selected ? Color.white : Color.primary)
-                .background(selected ? CarfoDesign.action : .clear, in: RoundedRectangle(cornerRadius: 6))
-                .contentShape(Rectangle())
+                .font(CarfoDesign.font(9)).lineLimit(1).opacity(selected ? 0.9 : 0.75)
+            }
+            Spacer(minLength: 0)
+            if selected { Image(systemName: "return").font(.system(size: 10)) }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(result.clip.name), \(result.clip.isImage ? "\(result.clip.width)×\(result.clip.height)" : timecode(result.segment?.start ?? 0))")
-        .accessibilityAddTraits(selected ? .isSelected : [])
-        .onDrag { NSItemProvider(contentsOf: result.clip.url) ?? NSItemProvider() }
+        .padding(.horizontal, 7).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading)
+        .foregroundStyle(selected ? Color.white : Color.primary)
+        .background(selected ? CarfoDesign.action : .clear, in: RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            model.select(result.id)
+        }
+        .onDrag({
+            makeDragItemProvider(for: result.clip.url, thumbnail: thumbImage)
+        }, preview: {
+            DragItemPreview(name: result.clip.name, iconName: mediaIcon, thumbnail: thumbImage)
+        })
         .contextMenu {
             Button(result.clip.isImage ? "Buka gambar" : result.clip.isAudio ? "Buka audio" : "Buka footage") { model.select(result.id); model.openSelected() }
             Button("Tampilkan di Finder") { model.select(result.id); model.revealSelected() }
@@ -858,4 +1045,69 @@ private struct SearchTextField: NSViewRepresentable {
             }
         }
     }
+}
+
+// MARK: - Drag & Drop Helpers & Components
+
+func makeDragItemProvider(for url: URL, thumbnail: NSImage? = nil) -> NSItemProvider {
+    let provider = NSItemProvider(object: url as NSURL)
+    provider.suggestedName = url.lastPathComponent
+    let type = UTType(filenameExtension: url.pathExtension) ?? .item
+    provider.registerFileRepresentation(forTypeIdentifier: type.identifier, fileOptions: [], visibility: .all) { completion in
+        completion(url, false, nil)
+        return nil
+    }
+    if let thumbnail {
+        provider.previewImageHandler = { (completion, _, _) in
+            completion?(thumbnail, nil)
+        }
+    }
+    return provider
+}
+
+struct DragItemPreview: View {
+    let name: String
+    let iconName: String
+    let thumbnail: NSImage?
+
+    var body: some View {
+        HStack(spacing: 9) {
+            if let thumbnail {
+                Image(nsImage: thumbnail)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 44, height: 32)
+                    .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+            } else {
+                Image(systemName: iconName)
+                    .font(.system(size: 16))
+                    .frame(width: 44, height: 32)
+                    .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+            }
+            Text(name)
+                .font(CarfoDesign.font(12, weight: .medium))
+                .foregroundStyle(Color.primary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color(NSColor.windowBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12), lineWidth: 1))
+        .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
+    }
+}
+
+final class WindowDragView: NSView {
+    override var mouseDownCanMoveWindow: Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
+}
+
+struct WindowDragBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> WindowDragView {
+        WindowDragView()
+    }
+    func updateNSView(_ nsView: WindowDragView, context: Context) {}
 }

@@ -107,20 +107,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     private func makeSearchPanel() {
         let isExpanded = model.hasQuery
-        let width: CGFloat = isExpanded ? 760 : 660
+        let width: CGFloat = 760
         let height: CGFloat = isExpanded ? 547 : 94
         let panel = SpotlightPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .floating
         panel.isFloatingPanel = true; panel.becomesKeyOnlyIfNeeded = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
-        panel.hidesOnDeactivate = false; panel.isMovableByWindowBackground = true
+        panel.hidesOnDeactivate = false; panel.isMovableByWindowBackground = false
         panel.title = "Pencarian Carfo"; panel.delegate = self
         panel.contentView = NSHostingView(rootView: SearchView(model: model) { [weak self] expanded in self?.resizeSearch(expanded: expanded) })
         searchPanel = panel
     }
     private func resizeSearch(expanded: Bool) {
-        let width: CGFloat = expanded ? 760 : 660
+        let width: CGFloat = 760
         let height: CGFloat = expanded ? 547 : 94
         let old = searchPanel.frame
         let origin = NSPoint(x: old.midX - width / 2, y: old.maxY - height)
@@ -140,7 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let point = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) } ?? NSScreen.main ?? NSScreen.screens[0]
         let isExpanded = model.hasQuery
-        let width: CGFloat = isExpanded ? 760 : 660, height: CGFloat = isExpanded ? 547 : 94
+        let width: CGFloat = 760, height: CGFloat = isExpanded ? 547 : 94
         let visible = screen.visibleFrame
         let top = visible.maxY - max(70, visible.height * 0.18)
         searchPanel.setFrame(NSRect(x: visible.midX - width / 2, y: max(visible.minY + 16, top - height), width: width, height: height), display: true)

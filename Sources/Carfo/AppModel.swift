@@ -20,6 +20,24 @@ enum SearchShortcut: String, CaseIterable, Identifiable {
     var label: String { switch self { case .optionSpace: return "⌥ Spasi"; case .controlOptionSpace: return "⌃ ⌥ Spasi"; case .controlSpace: return "⌃ Spasi" } }
 }
 
+enum AppLanguage: String, CaseIterable, Identifiable {
+    case indonesian = "id"
+    case englishUS = "en"
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .indonesian: return "Bahasa Indonesia"
+        case .englishUS: return "English (US)"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .indonesian: return "globe.asia.australia.fill"
+        case .englishUS: return "globe.americas.fill"
+        }
+    }
+}
+
 struct WorkProgress {
     var title: String
     var detail: String
@@ -51,6 +69,7 @@ final class AppModel: ObservableObject {
     @Published var launchAtLogin = SMAppService.mainApp.status == .enabled
     @Published var appearance: AppAppearance { didSet { defaults.set(appearance.rawValue, forKey: "appearance"); appearanceChanged?() } }
     @Published var shortcut: SearchShortcut { didSet { defaults.set(shortcut.rawValue, forKey: "shortcut"); shortcutChanged?() } }
+    @Published var language: AppLanguage { didSet { defaults.set(language.rawValue, forKey: "language") } }
     let store: LibraryStore
     let engine: LocalEngine
     let player = AVPlayer()
@@ -79,7 +98,6 @@ final class AppModel: ObservableObject {
         let videoCount = library.clips.filter(\.isVideo).count
         let imageCount = library.clips.filter(\.isImage).count
         let audioCount = library.clips.filter(\.isAudio).count
-        if semanticSearch { return "Google Embedding · Lokal" }
         var parts: [String] = []
         if videoCount > 0 { parts.append("\(videoCount) video") }
         if imageCount > 0 { parts.append("\(imageCount) gambar") }
@@ -111,6 +129,7 @@ final class AppModel: ObservableObject {
         library = LibraryManifest()
         appearance = AppAppearance(rawValue: defaults.string(forKey: "appearance") ?? "system") ?? .system
         shortcut = SearchShortcut(rawValue: defaults.string(forKey: "shortcut") ?? "optionSpace") ?? .optionSpace
+        language = AppLanguage(rawValue: defaults.string(forKey: "language") ?? "id") ?? .indonesian
         recentQueries = defaults.stringArray(forKey: "recentQueries") ?? []
         defaults.removeObject(forKey: "modelPath")
         let detected = LocalModelInstallation.discover(pythonOverride: defaults.string(forKey: "pythonPath"))
@@ -252,7 +271,7 @@ final class AppModel: ObservableObject {
                     + (canTranscribe && clip.hasAudio && clip.needsTranscript ? 1 : 0)
             }
         }
-        work = WorkProgress(title: "Mengindeks koleksi", detail: "Memuat Google EmbeddingGemma 2 di Mac ini", total: total)
+        work = WorkProgress(title: "Mengindeks koleksi", detail: "Menyiapkan indeks...", total: total)
         workTask = Task(priority: .utility) {
             defer {
                 work = nil
