@@ -7,7 +7,7 @@ let package = Package(
     products: [.executable(name: "Carfo", targets: ["Carfo"])],
     targets: [
         .target(name: "CarfoCore"),
-        .executableTarget(name: "Carfo", dependencies: ["CarfoCore"], resources: [.copy("Resources/Engine"), .copy("Resources/CarfoIcon.png")]),
+        .executableTarget(name: "Carfo", dependencies: ["CarfoCore"], resources: [.copy("Resources/Engine"), .copy("Resources/CarfoIcon.png"), .copy("Resources/CarfoMenuBarIcon.png")]),
         .testTarget(name: "CarfoCoreTests", dependencies: ["CarfoCore"])
     ],
     swiftLanguageModes: [.v5]

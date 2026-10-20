@@ -95,8 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func makeStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "film.stack", accessibilityDescription: "Carfo")
-            button.image?.isTemplate = true
+            button.image = Self.makeMenuBarIcon()
             button.toolTip = "Carfo · \(model.shortcut.label)"
             button.target = self; button.action = #selector(statusAction)
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -104,6 +103,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         popover = NSPopover()
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(rootView: MenuBarView(model: model))
+    }
+    private static func makeMenuBarIcon() -> NSImage {
+        let size = NSSize(width: 18, height: 18)
+        if let url = Bundle.module.url(forResource: "CarfoMenuBarIcon", withExtension: "png"),
+           let img = NSImage(contentsOf: url) {
+            img.size = size
+            img.isTemplate = true
+            return img
+        }
+        let candidates = [
+            "Sources/Carfo/Resources/CarfoMenuBarIcon.png",
+            "Assets/MenuBar/Carfo-menubar@2x.png",
+            "Assets/MenuBar/Carfo-menubar-master.png"
+        ]
+        for path in candidates {
+            let url = URL(fileURLWithPath: path)
+            if let img = NSImage(contentsOf: url) {
+                img.size = size
+                img.isTemplate = true
+                return img
+            }
+        }
+        let b64 = "iVBORw0KGgoAAAANSUhEUgAAACQAAAAkCAYAAADhAJiYAAAD+ElEQVR42s2YS2gVVxjHf3dmNFJFxGijjVHUxKhg6kKkQqUq+EAtCj6gCLoQVy58LKxgxYVmUZBuuyqlloIpCjY0vgUVhAqCFkWNpsbER22sNZhgqrlzx83/yMlh5s7ceCs9MJzh3O+c7zv/7/W/k+P9jRzgaQYIgShOqNxK7QcpDUs5oFyKC3qSRiVQA9TJwGYgr/1RVoNcxZGURgnyQ4AqYBJQC9QD04ApwARgrCXbDKxxL5KLMcDPAPNw4CNgshTWy4BarX+QctE8EACzgBuKrQJatEckYTNGC+apUjxTSicCY4CKBIUh8C/wDOgE2oC7wE1gGPCTdNW5BrmuGQLsAI4AV4C/LBclPS+AVuC4lBeAPmAxMCLBrV3a+6XWXGDwNX9TRPHfunk/0A5sAOYLLeOiBZZ8c4wxATAOuCXDf0gyyMTSdbmsU8J7gLXAHAXrUSl7CXya4K59llEHgE3AQeAY8Lsu1qffj6Qh9IsETxfJotuSeaIYmA6sALYD3wLnhOKrFFc/BeZZiTTAMoPQHc11DsyVck0N8IcCvAq4qiD1i2TUaxnfoeBu1XwZeCjdIQlQtWn+ULcdr6yqBkbFZORwvfcpox4D93XObWVWu5IjbvhueTHImLSbC1ySYC6mdhSsnoRVILsVd13KutfWhYfK1YH2RTKwCTgRl/Kucb9JIEyJgXI8jRYgA4ww0C0GWqxaca1Im/CdPmSKapShHc1WOAAsAc647jOxdEgHPlA/+q/GJOkIpfOtDYHVqU1HRsh0CKnQQiJnVe7PgeXqXd3AeeCwAjyw4s1NBF9nX1PDrXRsGODDFm1q0Zof015GqsjFxcRVYIYbFzGu9hxdb+W9IrAWEqhIE7BKa4+As2oFKDZOqvFGRehNIm/yMvrc1yGrgWVa+xFoUCJ8DOyWeycCuyz3lDS8EuXXybB7wGbgH8VLHvhadSUCVmo9LJWVZjXIQFytPZctkmXmQO7LyWUjM5SAQRtk5HqlMaKEVOB82KQpn/1DaYeZDXIwH5R7/OAL9TV8+rsDcBGyZ0XY/RLRSnIKGdi4Ttgp8j698AiuW8qsMVy0y3NXsqfglSk3Nrgx8h8BjxP6VH9wFfOH0SXe5Vch+IC2wMuAJ8o7TuAHvW9FmCruE8A7BeKSVW7ZIS8hDpiX2KE6s5oa61WFdugdU78yrPYYcmVumAhYgzzrQ4fqM/1igeZelQhcrYQ+FVnLQK26X2oFVeFLMF9SAFcrm6/V9SiPmu3j+NDhuD/mcKHkkZkMcMeoVYQ987Mh2z3Nb4HppjKGHG49VJgvYIxV8ZPN8aQLuBn4FQxTj3Yhvsuw8v6fcjmy1GZjbA/7YT838cbPg1pkv18bxMAAAAASUVORK5CYII="
+        if let data = Data(base64Encoded: b64), let img = NSImage(data: data) {
+            img.size = size
+            img.isTemplate = true
+            return img
+        }
+        let sf = NSImage(systemSymbolName: "film.stack", accessibilityDescription: "Carfo") ?? NSImage()
+        sf.isTemplate = true
+        return sf
     }
     private func makeSearchPanel() {
         let isExpanded = model.hasQuery
