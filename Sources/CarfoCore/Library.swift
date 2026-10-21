@@ -241,7 +241,7 @@ public typealias CarfoClip = FootageClip
 
 public struct LibraryManifest: Codable, Equatable, Sendable {
     public var version: Int = 1
-    public var model: String = "google/embeddinggemma-2"
+    public var model: String = "mlx-community/embeddinggemma-2-bf16"
     public var modelRevision: String?
     public var folders: [FootageFolder] = []
     public var clips: [FootageClip] = []

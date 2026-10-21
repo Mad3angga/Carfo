@@ -19,7 +19,7 @@ public struct LocalModelInstallation: Equatable, Sendable {
             modelPaths.append(bundleResources.appendingPathComponent("EmbeddingGemma"))
         }
         modelPaths.append(home.appendingPathComponent("Library/Application Support/Carfo/Model"))
-        for repository in ["models--google--embeddinggemma-2", "models--unsloth--embeddinggemma-2"] {
+        for repository in ["models--mlx-community--embeddinggemma-2-bf16", "models--google--embeddinggemma-2"] {
             let root = home.appendingPathComponent(".cache/huggingface/hub/\(repository)/snapshots")
             let snapshots = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey], options: .skipsHiddenFiles)) ?? []
             modelPaths += snapshots.sorted { $0.lastPathComponent < $1.lastPathComponent }

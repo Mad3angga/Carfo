@@ -83,7 +83,7 @@ class EmbeddingEngine:
             self.mx = mx
             print("EmbeddingGemma 2 loaded locally using MLX.", file=sys.stderr, flush=True)
         except ImportError as error:
-            raise RuntimeError("Mesin MLX belum dapat dimuat. Pilih runtime Python Unsloth yang mendukung EmbeddingGemma 2. " + str(error)) from error
+            raise RuntimeError("Mesin MLX belum dapat dimuat. Pastikan runtime Python mendukung mlx dan mlx_vlm untuk EmbeddingGemma 2. " + str(error)) from error
 
     def clear_cache(self):
         if self.mx is not None and hasattr(self.mx, "metal"):

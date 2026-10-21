@@ -22,7 +22,7 @@ if [[ -d "$PROJECT_ROOT/.build/release/Carfo_Carfo.bundle" ]]; then
 fi
 
 # Bundle AI Models (EmbeddingGemma 2 & Whisper)
-MODEL_SRC="/Users/apple/.cache/huggingface/hub/models--unsloth--embeddinggemma-2/snapshots/c8f89cc7ecb4ba5122cd15fdd487422b2b487daf"
+MODEL_SRC="/Users/apple/.cache/huggingface/hub/models--mlx-community--embeddinggemma-2-bf16/snapshots/1a4ffddb7905d3f63486748deabe091a01fb6201"
 WHISPER_SRC="/Users/apple/.cache/huggingface/hub/models--mlx-community--whisper-small-mlx/snapshots/45f3915923c7a79a5a5b5a7d909d39aeb0e5630e"
 
 if [[ -d "$MODEL_SRC" ]]; then

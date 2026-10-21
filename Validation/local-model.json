@@ -5,7 +5,7 @@
   "clips": 2,
   "imageDimensions": 768,
   "indexedClips": 2,
-  "model": "/Users/apple/.cache/huggingface/hub/models--unsloth--embeddinggemma-2/snapshots/c8f89cc7ecb4ba5122cd15fdd487422b2b487daf",
+  "model": "/Users/apple/.cache/huggingface/hub/models--mlx-community--embeddinggemma-2-bf16/snapshots/1a4ffddb7905d3f63486748deabe091a01fb6201",
   "ok": true,
   "python": "/Users/apple/.unsloth/studio/unsloth_studio/bin/python",
   "redScore": 0.7077016830444336,

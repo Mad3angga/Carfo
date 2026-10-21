@@ -98,7 +98,7 @@ final class CarfoCoreTests: XCTestCase {
     }
     func testDiscoveryUsesOnlyTheMatchingCachedArchitecture() throws {
         let home = try temporaryDirectory()
-        let model = home.appendingPathComponent(".cache/huggingface/hub/models--unsloth--embeddinggemma-2/snapshots/test-revision")
+        let model = home.appendingPathComponent(".cache/huggingface/hub/models--mlx-community--embeddinggemma-2-bf16/snapshots/test-revision")
         try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
         try Data("{\"model_type\":\"embedding_gemma2\"}".utf8).write(to: model.appendingPathComponent("config.json"))
         try Data([1]).write(to: model.appendingPathComponent("model.safetensors"))
@@ -112,6 +112,11 @@ final class CarfoCoreTests: XCTestCase {
         XCTAssertEqual(result.pythonExecutable?.resolvingSymlinksInPath().path, python.resolvingSymlinksInPath().path)
         try Data("{\"model_type\":\"gemma\"}".utf8).write(to: model.appendingPathComponent("config.json"))
         XCTAssertNil(LocalModelInstallation.discover(home: home).modelDirectory)
+    }
+    func testDiscoverFindsMLXCommunityModel() {
+        let result = LocalModelInstallation.discover()
+        XCTAssertTrue(result.isAvailable)
+        XCTAssertTrue(result.modelDirectory?.path.contains("models--mlx-community--embeddinggemma-2-bf16") == true)
     }
     func testTimecodeNeverOverflowsAtAnHour() {
         XCTAssertEqual(timecode(3661), "1:01:01")
