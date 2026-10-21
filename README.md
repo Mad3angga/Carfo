@@ -1,4 +1,4 @@
-# Carfo
+# Carfo (upload dmg pending)
 
 Cari video, gambar, dan audio di Mac berdasarkan isi medianya.
 
