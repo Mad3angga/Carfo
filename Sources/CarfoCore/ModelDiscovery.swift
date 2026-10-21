@@ -34,7 +34,9 @@ public struct LocalModelInstallation: Equatable, Sendable {
         if let pythonOverride, !pythonOverride.isEmpty { pythonPaths.append(pythonOverride) }
         if let bundleResources = Bundle.main.resourceURL {
             pythonPaths.append(bundleResources.appendingPathComponent("Python/bin/python").path)
+            pythonPaths.append(bundleResources.appendingPathComponent("Python/bin/python3").path)
             pythonPaths.append(bundleResources.appendingPathComponent("Runtime/bin/python").path)
+            pythonPaths.append(bundleResources.appendingPathComponent("Runtime/bin/python3").path)
             pythonPaths.append(Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/python").path)
         }
         pythonPaths += [home.appendingPathComponent(".unsloth/studio/unsloth_studio/bin/python").path,
