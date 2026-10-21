@@ -17,7 +17,6 @@ Repositori ini digunakan untuk membagikan aplikasi Carfo dalam format DMG. Sourc
 | Dialog | Ucapan dalam video atau audio, dengan kutipan dan timestamp jika transkrip tersedia | `kita mulai syuting besok` |
 | Suara | Bunyi dalam file audio dan video yang memiliki trek audio | `suara hujan dan petir` |
 
-<img width="2880" height="1870" alt="image" src="https://github.com/user-attachments/assets/10b0d80a-b235-489c-9c67-42e311b935a6" />
 <img width="2880" height="1870" alt="image" src="https://github.com/user-attachments/assets/9c36a637-381f-457a-9e9c-e4a3b0b31290" />
 <img width="1800" height="1048" alt="image" src="https://github.com/user-attachments/assets/8dcd8992-8e05-4f80-8cc8-3bc0c009af0e" />
 <img width="2880" height="1870" alt="image" src="https://github.com/user-attachments/assets/d9d1de20-8ed2-4a03-bee2-1e3c3da5164a" />
