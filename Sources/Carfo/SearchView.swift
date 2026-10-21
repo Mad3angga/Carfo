@@ -301,13 +301,7 @@ struct SearchView: View {
         .onKeyPress(.space) { model.togglePreview(); return .handled }
     }
     private func thumbnailImage(for clip: FootageClip) -> NSImage? {
-        if clip.isImage, let img = NSImage(contentsOf: clip.url) {
-            return img
-        }
-        if let thumbnail = clip.thumbnail {
-            return NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail))
-        }
-        return nil
+        clipThumbnailImage(for: clip, thumbnailDirectory: model.store.thumbnailDirectory)
     }
     private func dialoguePreview(_ selected: SearchResult) -> some View {
         let thumbImage = thumbnailImage(for: selected.clip)
@@ -406,16 +400,9 @@ struct SearchView: View {
     }
     @ViewBuilder
     private func imagePreviewView(_ selected: SearchResult, thumbImage: NSImage?) -> some View {
-        if let nsImage = NSImage(contentsOf: selected.clip.url) {
-            Image(nsImage: nsImage)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(maxWidth: .infinity).frame(height: 174)
-                .background(.black, in: RoundedRectangle(cornerRadius: 6))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .accessibilityLabel("Pratinjau \(selected.clip.name)")
-        } else if let thumbImage {
-            Image(nsImage: thumbImage)
+        let previewImage = ThumbnailCache.shared.image(for: selected.clip.url, targetSize: CGSize(width: 640, height: 480)) ?? thumbImage
+        if let previewImage {
+            Image(nsImage: previewImage)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(maxWidth: .infinity).frame(height: 174)
@@ -659,10 +646,7 @@ private struct DialogResultRow: View {
     private var selected: Bool { model.selectedID == result.id }
 
     var body: some View {
-        let thumbImage: NSImage? = {
-            if let thumbnail = result.clip.thumbnail { return NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail)) }
-            return nil
-        }()
+        let thumbImage = clipThumbnailImage(for: result.clip, thumbnailDirectory: model.store.thumbnailDirectory)
 
         HStack(alignment: .top, spacing: 14) {
             Text(timecode(result.matchedCue?.start ?? result.segment?.start ?? 0))
@@ -753,33 +737,24 @@ private struct ResultRow: View {
         }
     }
     var body: some View {
-        let thumbImage: NSImage? = {
-            if result.clip.isImage, let img = NSImage(contentsOf: result.clip.url) { return img }
-            if let thumbnail = result.clip.thumbnail { return NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail)) }
-            return nil
-        }()
+        let thumbImage = clipThumbnailImage(for: result.clip, thumbnailDirectory: model.store.thumbnailDirectory)
 
         HStack(spacing: 9) {
             if result.clip.isImage {
-                // Show actual image thumbnail for image files
-                if let thumbnail = result.clip.thumbnail, let image = NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail)) {
-                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill).frame(width: 48, height: 32).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
-                } else if let image = NSImage(contentsOf: result.clip.url) {
-                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill).frame(width: 48, height: 32).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
+                if let thumbImage {
+                    Image(nsImage: thumbImage).resizable().aspectRatio(contentMode: .fill).frame(width: 48, height: 32).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
                 } else {
                     Image(systemName: "photo").frame(width: 48, height: 32).background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
                 }
             } else if result.clip.isAudio {
-                // Show waveform icon for audio files
                 Image(systemName: "waveform")
                     .font(.system(size: 14))
                     .foregroundStyle(selected ? Color.white : CarfoDesign.accent)
                     .frame(width: 48, height: 32)
                     .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
             } else {
-                // Video thumbnail
-                if let thumbnail = result.clip.thumbnail, let image = NSImage(contentsOf: model.store.thumbnailDirectory.appendingPathComponent(thumbnail)) {
-                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill).frame(width: 48, height: 32).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
+                if let thumbImage {
+                    Image(nsImage: thumbImage).resizable().aspectRatio(contentMode: .fill).frame(width: 48, height: 32).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
                 } else {
                     Image(systemName: "film").frame(width: 48, height: 32).background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
                 }
@@ -1047,11 +1022,63 @@ private struct SearchTextField: NSViewRepresentable {
     }
 }
 
+// MARK: - Thumbnail Cache & Image Helpers
+
+final class ThumbnailCache {
+    static let shared = ThumbnailCache()
+    private let cache = NSCache<NSURL, NSImage>()
+
+    init() {
+        cache.countLimit = 300
+        cache.totalCostLimit = 64 * 1024 * 1024 // 64 MB
+    }
+
+    func image(for url: URL, targetSize: CGSize? = nil) -> NSImage? {
+        let key = url as NSURL
+        if let cached = cache.object(forKey: key) {
+            return cached
+        }
+        let image: NSImage?
+        if let targetSize {
+            image = loadDownsampled(url: url, maxPixelSize: max(targetSize.width, targetSize.height) * 2)
+        } else {
+            image = NSImage(contentsOf: url)
+        }
+        if let image {
+            let cost = Int(image.size.width * image.size.height * 4)
+            cache.setObject(image, forKey: key, cost: cost)
+        }
+        return image
+    }
+
+    private func loadDownsampled(url: URL, maxPixelSize: CGFloat) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        guard let cgThumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return NSImage(cgImage: cgThumb, size: NSSize(width: cgThumb.width, height: cgThumb.height))
+    }
+}
+
+func clipThumbnailImage(for clip: FootageClip, thumbnailDirectory: URL, targetSize: CGSize = CGSize(width: 96, height: 64)) -> NSImage? {
+    if let thumbnail = clip.thumbnail {
+        let thumbURL = thumbnailDirectory.appendingPathComponent(thumbnail)
+        return ThumbnailCache.shared.image(for: thumbURL)
+    }
+    if clip.isImage {
+        return ThumbnailCache.shared.image(for: clip.url, targetSize: targetSize)
+    }
+    return nil
+}
+
 // MARK: - Drag & Drop Helpers & Components
 
 func makeDragItemProvider(for url: URL, thumbnail: NSImage? = nil) -> NSItemProvider {
     let provider = NSItemProvider(object: url as NSURL)
-    provider.suggestedName = url.lastPathComponent
+    provider.suggestedName = url.deletingPathExtension().lastPathComponent
     let type = UTType(filenameExtension: url.pathExtension) ?? .item
     provider.registerFileRepresentation(forTypeIdentifier: type.identifier, fileOptions: [], visibility: .all) { completion in
         completion(url, false, nil)

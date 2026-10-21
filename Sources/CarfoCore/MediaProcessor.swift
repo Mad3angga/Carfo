@@ -157,7 +157,15 @@ public enum LibraryScanner {
         guard CGImageDestinationFinalize(output) else { throw MediaError.exportFailed }
     }
 
-    public static func scan(folder: FootageFolder, previous: [FootageClip], thumbnails: URL) async throws -> ScanReport {
+    /// Reported every few files so callers can save partial results and show progress.
+    public struct ScanProgress: Sendable {
+        public var processed: Int
+        public var total: Int
+        /// Clips produced since the previous report.
+        public var clips: [FootageClip]
+    }
+
+    public static func scan(folder: FootageFolder, previous: [FootageClip], thumbnails: URL, progress: (@Sendable (ScanProgress) async -> Void)? = nil) async throws -> ScanReport {
         let root = URL(fileURLWithPath: folder.path)
         guard FileManager.default.isReadableFile(atPath: root.path) else { throw CocoaError(.fileReadNoPermission) }
         var errors: [String] = []
@@ -171,94 +179,105 @@ public enum LibraryScanner {
             try Task.checkCancellation()
             if extensions.contains(url.pathExtension.lowercased()) { files.append(url) }
         }
+        files.sort { $0.path < $1.path }
+        await progress?(ScanProgress(processed: 0, total: files.count, clips: []))
         var clips: [FootageClip] = []
-        for url in files.sorted(by: { $0.path < $1.path }) {
+        var reported = 0
+        for (index, url) in files.enumerated() {
             try Task.checkCancellation()
             do {
-                let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey])
-                guard values.isRegularFile == true, values.isSymbolicLink != true else { continue }
-                let size = Int64(values.fileSize ?? 0)
-                let date = values.contentModificationDate ?? .distantPast
-                let fileMediaType = MediaType.from(extension: url.pathExtension)
-
-                if var cached = old[url.path], cached.fileSize == size, cached.modifiedAt == date {
-                    cached.mediaType = fileMediaType
-                    if cached.thumbnail == nil && fileMediaType != .audio {
-                        cached.thumbnail = "\(cached.id.uuidString).jpg"
-                    }
-                    if let name = cached.thumbnail, !FileManager.default.fileExists(atPath: thumbnails.appendingPathComponent(name).path) {
-                        switch fileMediaType {
-                        case .image:
-                            try imageThumbnail(url: url, destination: thumbnails.appendingPathComponent(name))
-                        case .video:
-                            try await MediaProcessor.frame(url: url, at: min(1, cached.duration / 2), destination: thumbnails.appendingPathComponent(name))
-                        case .audio:
-                            break // Audio files have no visual thumbnail
-                        }
-                    }
-                    cached.indexError = nil
-                    clips.append(cached)
-                    continue
-                }
-
-                let id = old[url.path]?.id ?? UUID()
-                let thumbnail = fileMediaType == .audio ? nil : "\(id.uuidString).jpg"
-
-                switch fileMediaType {
-                case .image:
-                    let dims = try imageMetadata(url: url)
-                    if let thumbnail {
-                        try imageThumbnail(url: url, destination: thumbnails.appendingPathComponent(thumbnail))
-                    }
-                    clips.append(FootageClip(
-                        id: id, folderID: folder.id, path: url.path,
-                        relativePath: String(url.path.dropFirst(root.path.count + 1)),
-                        fileSize: size, modifiedAt: date, duration: 0,
-                        width: dims.width, height: dims.height, frameRate: 0, hasAudio: false,
-                        thumbnail: thumbnail,
-                        segments: [VideoSegment(start: 0, end: 0)],
-                        mediaType: .image
-                    ))
-
-                case .audio:
-                    let meta = try await audioMetadata(url: url)
-                    clips.append(FootageClip(
-                        id: id, folderID: folder.id, path: url.path,
-                        relativePath: String(url.path.dropFirst(root.path.count + 1)),
-                        fileSize: size, modifiedAt: date, duration: meta.duration,
-                        width: 0, height: 0, frameRate: 0, hasAudio: true,
-                        thumbnail: nil,
-                        segments: SegmentPlanner.segments(duration: meta.duration),
-                        mediaType: .audio
-                    ))
-
-                case .video:
-                    let metadata = try await MediaProcessor.metadata(url: url)
-                    if let thumbnail {
-                        try await MediaProcessor.frame(url: url, at: min(1, metadata.duration / 2), destination: thumbnails.appendingPathComponent(thumbnail))
-                    }
-                    let srtURL = url.deletingPathExtension().appendingPathExtension("srt")
-                    let vttURL = url.deletingPathExtension().appendingPathExtension("vtt")
-                    var transcripts: [TranscriptCue] = []
-                    if FileManager.default.fileExists(atPath: srtURL.path) {
-                        transcripts = SubtitleParser.parse(url: srtURL)
-                    } else if FileManager.default.fileExists(atPath: vttURL.path) {
-                        transcripts = SubtitleParser.parse(url: vttURL)
-                    }
-                    clips.append(FootageClip(
-                        id: id, folderID: folder.id, path: url.path,
-                        relativePath: String(url.path.dropFirst(root.path.count + 1)),
-                        fileSize: size, modifiedAt: date, duration: metadata.duration,
-                        width: metadata.width, height: metadata.height, frameRate: metadata.frameRate,
-                        hasAudio: metadata.hasAudio, thumbnail: thumbnail,
-                        segments: SegmentPlanner.segments(duration: metadata.duration),
-                        transcripts: transcripts, mediaType: .video
-                    ))
-                }
+                if let clip = try await scanFile(url: url, folder: folder, root: root, old: old, thumbnails: thumbnails) { clips.append(clip) }
             } catch is CancellationError { throw CancellationError() }
             catch { errors.append("\(url.lastPathComponent): \(error.localizedDescription)") }
+            if let progress, (index + 1) % 10 == 0 || index + 1 == files.count {
+                await progress(ScanProgress(processed: index + 1, total: files.count, clips: Array(clips[reported...])))
+                reported = clips.count
+            }
         }
         return ScanReport(clips: clips, errors: errors)
+    }
+
+    private static func scanFile(url: URL, folder: FootageFolder, root: URL, old: [String: FootageClip], thumbnails: URL) async throws -> FootageClip? {
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true else { return nil }
+        let size = Int64(values.fileSize ?? 0)
+        let date = values.contentModificationDate ?? .distantPast
+        let fileMediaType = MediaType.from(extension: url.pathExtension)
+
+        if var cached = old[url.path], cached.fileSize == size, cached.modifiedAt == date {
+            cached.mediaType = fileMediaType
+            if cached.thumbnail == nil && fileMediaType != .audio {
+                cached.thumbnail = "\(cached.id.uuidString).jpg"
+            }
+            if let name = cached.thumbnail, !FileManager.default.fileExists(atPath: thumbnails.appendingPathComponent(name).path) {
+                switch fileMediaType {
+                case .image:
+                    try imageThumbnail(url: url, destination: thumbnails.appendingPathComponent(name))
+                case .video:
+                    try await MediaProcessor.frame(url: url, at: min(1, cached.duration / 2), destination: thumbnails.appendingPathComponent(name))
+                case .audio:
+                    break // Audio files have no visual thumbnail
+                }
+            }
+            cached.indexError = nil
+            return cached
+        }
+
+        let id = old[url.path]?.id ?? UUID()
+        let thumbnail = fileMediaType == .audio ? nil : "\(id.uuidString).jpg"
+        let relativePath = String(url.path.dropFirst(root.path.count + 1))
+
+        switch fileMediaType {
+        case .image:
+            let dims = try imageMetadata(url: url)
+            if let thumbnail {
+                try imageThumbnail(url: url, destination: thumbnails.appendingPathComponent(thumbnail))
+            }
+            return FootageClip(
+                id: id, folderID: folder.id, path: url.path,
+                relativePath: relativePath,
+                fileSize: size, modifiedAt: date, duration: 0,
+                width: dims.width, height: dims.height, frameRate: 0, hasAudio: false,
+                thumbnail: thumbnail,
+                segments: [VideoSegment(start: 0, end: 0)],
+                mediaType: .image
+            )
+
+        case .audio:
+            let meta = try await audioMetadata(url: url)
+            return FootageClip(
+                id: id, folderID: folder.id, path: url.path,
+                relativePath: relativePath,
+                fileSize: size, modifiedAt: date, duration: meta.duration,
+                width: 0, height: 0, frameRate: 0, hasAudio: true,
+                thumbnail: nil,
+                segments: SegmentPlanner.segments(duration: meta.duration),
+                mediaType: .audio
+            )
+
+        case .video:
+            let metadata = try await MediaProcessor.metadata(url: url)
+            if let thumbnail {
+                try await MediaProcessor.frame(url: url, at: min(1, metadata.duration / 2), destination: thumbnails.appendingPathComponent(thumbnail))
+            }
+            let srtURL = url.deletingPathExtension().appendingPathExtension("srt")
+            let vttURL = url.deletingPathExtension().appendingPathExtension("vtt")
+            var transcripts: [TranscriptCue] = []
+            if FileManager.default.fileExists(atPath: srtURL.path) {
+                transcripts = SubtitleParser.parse(url: srtURL)
+            } else if FileManager.default.fileExists(atPath: vttURL.path) {
+                transcripts = SubtitleParser.parse(url: vttURL)
+            }
+            return FootageClip(
+                id: id, folderID: folder.id, path: url.path,
+                relativePath: relativePath,
+                fileSize: size, modifiedAt: date, duration: metadata.duration,
+                width: metadata.width, height: metadata.height, frameRate: metadata.frameRate,
+                hasAudio: metadata.hasAudio, thumbnail: thumbnail,
+                segments: SegmentPlanner.segments(duration: metadata.duration),
+                transcripts: transcripts, mediaType: .video
+            )
+        }
     }
 }
 

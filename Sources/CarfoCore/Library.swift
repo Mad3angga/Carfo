@@ -56,9 +56,11 @@ public struct FootageFolder: Codable, Identifiable, Equatable, Sendable {
     public var id: UUID
     public var path: String
     public var bookmark: Data?
+    /// Last time a full scan of this folder finished. Lets an interrupted rescan skip folders it already completed.
+    public var scannedAt: Date?
     public var name: String { URL(fileURLWithPath: path).lastPathComponent }
-    public init(id: UUID = UUID(), path: String, bookmark: Data? = nil) {
-        self.id = id; self.path = path; self.bookmark = bookmark
+    public init(id: UUID = UUID(), path: String, bookmark: Data? = nil, scannedAt: Date? = nil) {
+        self.id = id; self.path = path; self.bookmark = bookmark; self.scannedAt = scannedAt
     }
 }
 
@@ -254,6 +256,7 @@ public struct LibraryStore: Sendable {
         try FileManager.default.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: true)
     }
     public var thumbnailDirectory: URL { directory.appendingPathComponent("Thumbnails", isDirectory: true) }
+    public var workingDirectory: URL { directory.appendingPathComponent("Working", isDirectory: true) }
     public var manifestURL: URL { directory.appendingPathComponent("library.json") }
     public func load() throws -> LibraryManifest {
         guard FileManager.default.fileExists(atPath: manifestURL.path) else { return LibraryManifest() }
@@ -265,6 +268,20 @@ public struct LibraryStore: Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         try encoder.encode(manifest).write(to: manifestURL, options: .atomic)
+    }
+    public func cleanWorkingDirectories() {
+        if FileManager.default.fileExists(atPath: workingDirectory.path) {
+            try? FileManager.default.removeItem(at: workingDirectory)
+        }
+        try? FileManager.default.createDirectory(at: workingDirectory, withIntermediateDirectories: true)
+    }
+    public func pruneThumbnails(keeping activeNames: Set<String>) {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: thumbnailDirectory, includingPropertiesForKeys: nil) else { return }
+        for file in files {
+            if !activeNames.contains(file.lastPathComponent) {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
     }
     public enum LibraryError: LocalizedError {
         case unsupportedVersion

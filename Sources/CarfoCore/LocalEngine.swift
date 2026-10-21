@@ -117,11 +117,16 @@ public actor LocalEngine {
         bytes.append(10)
         try input.write(contentsOf: bytes)
         let deadline = Date().addingTimeInterval(timeout)
+        var wasCancelled = false
         while Date() < deadline {
-            if Task.isCancelled { stop(); throw CancellationError() }
+            if Task.isCancelled { wasCancelled = true }
             if let newline = pending.firstIndex(of: 10) {
                 let line = pending.prefix(upTo: newline)
                 pending.removeSubrange(...newline)
+                if wasCancelled {
+                    resetIdleTimer()
+                    throw CancellationError()
+                }
                 guard let object = try JSONSerialization.jsonObject(with: line) as? [String: Any] else { throw EngineError.invalidResponse }
                 if object["ok"] as? Bool == false { throw EngineError.inference(object["error"] as? String ?? "Model tidak dapat memproses media ini.") }
                 resetIdleTimer()

@@ -46,9 +46,28 @@ struct WorkProgress {
     var fraction: Double? { total > 0 ? Double(completed) / Double(total) : nil }
 }
 
+/// Clip counts computed once per library change instead of on every view render.
+struct LibraryStats {
+    var video = 0, image = 0, audio = 0, indexed = 0, transcribed = 0, needsTranscript = 0
+    init() {}
+    init(_ clips: [FootageClip]) {
+        for clip in clips {
+            switch clip.mediaType {
+            case .video: video += 1
+            case .image: image += 1
+            case .audio: audio += 1
+            }
+            if clip.isIndexed { indexed += 1 }
+            if clip.transcribedAt != nil || !clip.transcripts.isEmpty { transcribed += 1 }
+            if clip.needsTranscript { needsTranscript += 1 }
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var library: LibraryManifest
+    @Published var library: LibraryManifest { didSet { stats = LibraryStats(library.clips) } }
+    private(set) var stats = LibraryStats()
     @Published var query = "" { didSet { scheduleSearch() } }
     @Published var mode: SearchMode = .video { didSet { scheduleSearch() } }
     @Published var folderFilter: UUID? { didSet { scheduleSearch() } }
@@ -81,27 +100,33 @@ final class AppModel: ObservableObject {
     var shortcutChanged: (() -> Void)?
     private var searchTask: Task<Void, Never>?
     private var workTask: Task<Void, Never>?
-    private var accessURLs: [URL] = []
+    private var saveTask: Task<Void, Never>?
+    /// Serial, so snapshots reach disk in order without blocking the UI.
+    private let saveQueue = DispatchQueue(label: "id.carfo.library-save", qos: .utility)
+    private var accessURLs: [UUID: URL] = [:]
     private var queryCache: [String: [Float]] = [:]
     private var endObserver: NSObjectProtocol?
     private var playbackObserver: NSKeyValueObservation?
     var isWorking: Bool { work != nil }
     var selected: SearchResult? { results.first { $0.id == selectedID } }
     var indexMatchesModel: Bool { library.modelRevision == nil || library.modelRevision == installation.modelDirectory?.lastPathComponent }
-    var indexedCount: Int { indexMatchesModel ? library.clips.filter(\.isIndexed).count : 0 }
-    var transcribedCount: Int { library.clips.filter { $0.transcribedAt != nil || !$0.transcripts.isEmpty }.count }
-    var clipsNeedingTranscriptCount: Int { installation.canTranscribe ? library.clips.filter(\.needsTranscript).count : 0 }
+    var indexedCount: Int { indexMatchesModel ? stats.indexed : 0 }
+    var transcribedCount: Int { stats.transcribed }
+    var clipsNeedingTranscriptCount: Int { installation.canTranscribe ? stats.needsTranscript : 0 }
     var hasQuery: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// Start of an unfinished "Pindai ulang" run. Survives stops and relaunches so pressing the button again resumes the run.
+    private var rescanSessionStart: Date? {
+        get { defaults.object(forKey: "rescanSessionStart") as? Date }
+        set { defaults.set(newValue, forKey: "rescanSessionStart") }
+    }
+    var hasPendingRescan: Bool { rescanSessionStart != nil }
     var statusText: String {
         if let work { return work.title }
         if library.clips.isEmpty { return "Cari di file lokal" }
-        let videoCount = library.clips.filter(\.isVideo).count
-        let imageCount = library.clips.filter(\.isImage).count
-        let audioCount = library.clips.filter(\.isAudio).count
         var parts: [String] = []
-        if videoCount > 0 { parts.append("\(videoCount) video") }
-        if imageCount > 0 { parts.append("\(imageCount) gambar") }
-        if audioCount > 0 { parts.append("\(audioCount) audio") }
+        if stats.video > 0 { parts.append("\(stats.video) video") }
+        if stats.image > 0 { parts.append("\(stats.image) gambar") }
+        if stats.audio > 0 { parts.append("\(stats.audio) audio") }
         return parts.isEmpty ? "\(library.clips.count) file di Mac ini" : "\(parts.joined(separator: ", ")) di Mac ini"
     }
     var modelStatus: String {
@@ -139,6 +164,10 @@ final class AppModel: ObservableObject {
         engine = LocalEngine(installation: detected, script: script, logDirectory: root)
         do { library = try store.load() }
         catch { notice = "Indeks tidak dapat dibaca: \(error.localizedDescription). File indeks tetap disimpan di \(store.manifestURL.path)." }
+        stats = LibraryStats(library.clips) // didSet does not run inside init
+        store.cleanWorkingDirectories()
+        let activeThumbnails = Set(library.clips.compactMap(\.thumbnail))
+        store.pruneThumbnails(keeping: activeThumbnails)
         restoreFolderAccess()
         player.actionAtItemEnd = .pause
         playbackObserver = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
@@ -156,7 +185,10 @@ final class AppModel: ObservableObject {
             guard let bookmark = folder.bookmark else { continue }
             var stale = false
             if let url = try? URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope, .withoutUI], relativeTo: nil, bookmarkDataIsStale: &stale) {
-                if url.startAccessingSecurityScopedResource() { accessURLs.append(url) }
+                if url.startAccessingSecurityScopedResource() {
+                    accessURLs[folder.id]?.stopAccessingSecurityScopedResource()
+                    accessURLs[folder.id] = url
+                }
                 library.folders[index].path = url.path
                 if stale { library.folders[index].bookmark = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) }
             }
@@ -165,9 +197,31 @@ final class AppModel: ObservableObject {
             folderAccessError = "Salah satu folder tidak dapat dibuka. Pilih ulang folder untuk memperbarui aksesnya."
         }
     }
+    /// Saves now. Encoding the whole library takes hundreds of ms, so it runs on `saveQueue`, not the main thread.
     func persist() {
-        do { try store.save(library) }
-        catch { notice = "Indeks belum tersimpan: \(error.localizedDescription)" }
+        saveTask?.cancel(); saveTask = nil
+        let snapshot = library, store = store
+        saveQueue.async { [weak self] in
+            do { try store.save(snapshot) }
+            catch {
+                let message = error.localizedDescription
+                Task { @MainActor in self?.notice = "Indeks belum tersimpan: \(message)" }
+            }
+        }
+    }
+    /// Coalesces the frequent saves made while scanning and indexing into one write every few seconds.
+    func persistSoon() {
+        guard saveTask == nil else { return }
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            self?.persist()
+        }
+    }
+    /// Writes any pending changes and waits until they are on disk. Used when quitting.
+    func flushSaves() {
+        persist()
+        saveQueue.sync {}
     }
     func pickFolder() {
         guard !isWorking else { notice = "Tunggu proses selesai sebelum menambah folder."; return }
@@ -185,57 +239,141 @@ final class AppModel: ObservableObject {
         folderAccessError = nil
         for url in urls {
             let standardized = url.standardizedFileURL
-            if url.startAccessingSecurityScopedResource() { accessURLs.append(url) }
             let bookmark = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
             if let index = library.folders.firstIndex(where: { standardized.path == URL(fileURLWithPath: $0.path).standardizedFileURL.path }) {
                 library.folders[index].bookmark = bookmark
+                if url.startAccessingSecurityScopedResource() {
+                    let folderID = library.folders[index].id
+                    accessURLs[folderID]?.stopAccessingSecurityScopedResource()
+                    accessURLs[folderID] = url
+                }
                 continue
             }
-            library.folders.append(CarfoFolder(path: standardized.path, bookmark: bookmark))
+            let newFolder = CarfoFolder(path: standardized.path, bookmark: bookmark)
+            if url.startAccessingSecurityScopedResource() {
+                accessURLs[newFolder.id] = url
+            }
+            library.folders.append(newFolder)
         }
         persist(); scanFolders(autoIndex: true)
     }
     func removeFolder(_ folder: CarfoFolder) {
         guard !isWorking else { return }
+        if let access = accessURLs.removeValue(forKey: folder.id) {
+            access.stopAccessingSecurityScopedResource()
+        }
         library.folders.removeAll { $0.id == folder.id }
         library.clips.removeAll { $0.folderID == folder.id }
         if folderFilter == folder.id { folderFilter = nil }
         persist(); scheduleSearch()
+        let activeThumbnails = Set(library.clips.compactMap(\.thumbnail))
+        store.pruneThumbnails(keeping: activeThumbnails)
     }
-    func scanFolders(autoIndex: Bool = false) {
+    /// - Parameter force: "Pindai ulang". Starts a rescan run over every folder, or resumes the unfinished one.
+    ///   Folders the run already finished are skipped. Without `force`, only folders never scanned are read.
+    func scanFolders(autoIndex: Bool = false, force: Bool = false) {
         guard !isWorking else { return }
-        let folders = library.folders
-        guard !folders.isEmpty else { pickFolder(); return }
+        guard !library.folders.isEmpty else { pickFolder(); return }
+        let session: Date? = force ? (rescanSessionStart ?? Date()) : nil
+        if let session { rescanSessionStart = session }
+        let foldersWithClips = Set(library.clips.map(\.folderID))
+        func needsScan(_ folder: CarfoFolder) -> Bool {
+            if let session { return (folder.scannedAt ?? .distantPast) < session }
+            return folder.scannedAt == nil && !foldersWithClips.contains(folder.id)
+        }
+        // A rescan run counts every folder, so a resumed run shows the folders it already finished as done.
+        let scope = session == nil ? library.folders.filter(needsScan) : library.folders
+        let pending = scope.filter(needsScan)
+        guard !pending.isEmpty else {
+            if autoIndex && installation.isAvailable {
+                if library.clips.contains(where: needsIndexing) { startIndexing(); return }
+                notice = "Semua folder sudah dipindai dan diindeks."
+            } else {
+                notice = "Semua folder sudah dipindai."
+            }
+            if session != nil { rescanSessionStart = nil }
+            return
+        }
         folderAccessError = nil
-        work = WorkProgress(title: "Membaca koleksi...", detail: "Mencari file media dan menyiapkan thumbnail")
+        let alreadyDone = scope.count - pending.count
+        // Progress units: 100 per folder, so the bar also moves file by file inside a folder.
+        work = WorkProgress(title: "Membaca koleksi...", detail: "Mencari file media dan menyiapkan thumbnail", completed: alreadyDone * 100, total: scope.count * 100)
         workTask = Task {
-            defer { work = nil; workTask = nil; scheduleSearch() }
+            defer { persist(); work = nil; workTask = nil; scheduleSearch() }
             var issues: [String] = []
-            for folder in folders {
+            for (offset, folder) in pending.enumerated() {
+                let position = alreadyDone + offset
                 do {
                     try Task.checkCancellation()
                     work?.detail = folder.name
-                    let report = try await LibraryScanner.scan(folder: folder, previous: library.clips, thumbnails: store.thumbnailDirectory)
-                    library.clips.removeAll { $0.folderID == folder.id }
-                    library.clips += report.clips
+                    work?.completed = position * 100
+                    let report = try await LibraryScanner.scan(folder: folder, previous: library.clips, thumbnails: store.thumbnailDirectory) { [weak self] progress in
+                        await self?.applyScanProgress(progress, folder: folder, position: position)
+                    }
+                    // The full report also drops clips whose files were deleted.
+                    var clips = library.clips
+                    clips.removeAll { $0.folderID == folder.id }
+                    clips += report.clips
+                    library.clips = clips
+                    if let index = library.folders.firstIndex(where: { $0.id == folder.id }) { library.folders[index].scannedAt = Date() }
                     issues += report.errors
-                    persist()
+                    persistSoon()
                 } catch is CancellationError { return }
                 catch {
                     issues.append("\(folder.name): \(error.localizedDescription)")
                     if !FileManager.default.isReadableFile(atPath: folder.path) { folderAccessError = "Folder \(folder.name) tidak dapat dibuka. Pilih ulang folder untuk memperbarui aksesnya." }
                 }
             }
+            work?.completed = scope.count * 100
             if !issues.isEmpty { notice = issues.prefix(3).joined(separator: "\n") }
-            // Auto-index after scan if requested and there are un-indexed or un-transcribed clips
-            if autoIndex && installation.isAvailable {
-                let hasUnindexed = library.clips.contains { !$0.isIndexed || (installation.canTranscribe && $0.needsTranscript) }
-                if hasUnindexed {
-                    // Must schedule on main actor since we're already on it
-                    Task { @MainActor in self.startIndexing() }
-                }
+            // Auto-index after scan if requested and there are un-indexed or un-transcribed clips.
+            // The rescan run stays open until indexing also finishes, so stopping during indexing does not rescan again.
+            if autoIndex && installation.isAvailable && library.clips.contains(where: needsIndexing) {
+                // Must schedule on main actor since we're already on it
+                Task { @MainActor in self.startIndexing() }
+            } else if session != nil {
+                rescanSessionStart = nil
             }
         }
+    }
+    private func needsIndexing(_ clip: FootageClip) -> Bool {
+        !clip.isIndexed || (installation.canTranscribe && clip.needsTranscript)
+    }
+    private func applyScanProgress(_ progress: LibraryScanner.ScanProgress, folder: CarfoFolder, position: Int) {
+        mergeScannedClips(progress.clips)
+        let share = progress.total > 0 ? progress.processed * 100 / progress.total : 0
+        work?.completed = position * 100 + share
+        work?.detail = "\(folder.name) · \(progress.processed)/\(progress.total) file"
+        if !progress.clips.isEmpty { persistSoon() }
+    }
+    /// Adds or updates clips from a scan in progress. Clips the scan has not reached yet are kept,
+    /// so stopping mid-folder loses nothing and the next scan reuses these as cache hits.
+    private func mergeScannedClips(_ scanned: [FootageClip]) {
+        guard !scanned.isEmpty else { return }
+        var clips = library.clips
+        var positions = Dictionary(clips.indices.map { (clips[$0].folderID.uuidString + clips[$0].path, $0) }, uniquingKeysWith: { first, _ in first })
+        for clip in scanned {
+            let key = clip.folderID.uuidString + clip.path
+            if let index = positions[key] { clips[index] = clip }
+            else { positions[key] = clips.count; clips.append(clip) }
+        }
+        library.clips = clips
+    }
+    /// Work units for one clip: one per segment, plus one for its transcript when transcription is available.
+    private static func indexUnits(_ clip: FootageClip, canTranscribe: Bool) -> (done: Int, total: Int) {
+        let finished: (VideoSegment) -> Bool
+        switch clip.mediaType {
+        case .image: finished = { $0.visualEmbedding != nil }
+        case .audio: finished = { $0.audioEmbedding != nil }
+        case .video: finished = { $0.visualEmbedding != nil && (!clip.hasAudio || $0.audioEmbedding != nil) }
+        }
+        var total = clip.segments.count
+        var done = clip.segments.filter(finished).count
+        if canTranscribe && clip.hasAudio {
+            total += 1
+            if !clip.needsTranscript { done += 1 }
+        }
+        return (done, total)
     }
     func startIndexing() {
         guard !isWorking else { return }
@@ -258,22 +396,21 @@ final class AppModel: ObservableObject {
         }
         let canTranscribe = installation.canTranscribe
         let candidates = library.clips.filter { !$0.isIndexed || (canTranscribe && $0.needsTranscript) }
-        guard !candidates.isEmpty else { notice = "Semua file sudah diindeks. Pindai ulang folder untuk menemukan file baru."; return }
-        let total = candidates.reduce(0) { count, clip in
-            switch clip.mediaType {
-            case .image:
-                return count + clip.segments.filter { $0.visualEmbedding == nil }.count
-            case .audio:
-                return count + clip.segments.filter { $0.audioEmbedding == nil }.count
-                    + (canTranscribe && clip.hasAudio && clip.needsTranscript ? 1 : 0)
-            case .video:
-                return count + clip.segments.filter { $0.visualEmbedding == nil || (clip.hasAudio && $0.audioEmbedding == nil) }.count
-                    + (canTranscribe && clip.hasAudio && clip.needsTranscript ? 1 : 0)
-            }
+        guard !candidates.isEmpty else {
+            rescanSessionStart = nil
+            notice = "Semua file sudah diindeks. Pindai ulang folder untuk menemukan file baru."
+            return
         }
-        work = WorkProgress(title: "Mengindeks koleksi", detail: "Menyiapkan indeks...", total: total)
+        // Count finished work too, so a resumed run continues the bar instead of restarting at 0%.
+        var total = 0, done = 0
+        for clip in library.clips {
+            let units = Self.indexUnits(clip, canTranscribe: canTranscribe)
+            total += units.total; done += units.done
+        }
+        work = WorkProgress(title: "Mengindeks koleksi", detail: "Menyiapkan indeks...", completed: done, total: total)
         workTask = Task(priority: .utility) {
             defer {
+                persist()
                 work = nil
                 workTask = nil
                 scheduleSearch()
@@ -304,13 +441,13 @@ final class AppModel: ObservableObject {
                             }
                             library.clips[clipIndex].transcripts = cues
                             library.clips[clipIndex].transcribedAt = Date()
-                            persist()
+                            persistSoon()
                         } catch is CancellationError {
                             throw CancellationError()
                         } catch {
                             library.clips[clipIndex].transcribedAt = Date()
                             library.clips[clipIndex].indexError = error.localizedDescription
-                            persist()
+                            persistSoon()
                         }
                         work?.completed += 1
                     }
@@ -325,10 +462,10 @@ final class AppModel: ObservableObject {
                             segment.visualEmbedding = try await engine.embed(frames: [candidate.url])
                             library.clips[clipIndex].segments[segmentIndex] = segment
                             work?.completed += 1
-                            persist()
+                            persistSoon()
                         }
                         library.clips[clipIndex].indexedAt = Date(); library.clips[clipIndex].indexError = nil
-                        persist()
+                        persistSoon()
                         await engine.purge()
                         try await Task.sleep(for: .milliseconds(50))
                         continue
@@ -349,10 +486,10 @@ final class AppModel: ObservableObject {
                             segment.audioEmbedding = try await engine.embed(audio: wav)
                             library.clips[clipIndex].segments[segmentIndex] = segment
                             work?.completed += 1
-                            persist()
+                            persistSoon()
                         }
                         library.clips[clipIndex].indexedAt = Date(); library.clips[clipIndex].indexError = nil
-                        persist()
+                        persistSoon()
                         await engine.purge()
                         try await Task.sleep(for: .milliseconds(50))
                         continue
@@ -371,7 +508,7 @@ final class AppModel: ObservableObject {
                             let frames = try await MediaProcessor.frames(url: candidate.url, segment: segment, directory: temporary)
                             segment.visualEmbedding = try await engine.embed(frames: frames)
                             library.clips[clipIndex].segments[segmentIndex] = segment
-                            persist()
+                            persistSoon()
                         }
                         if candidate.hasAudio && segment.audioEmbedding == nil {
                             let wav = temporary.appendingPathComponent("audio.wav")
@@ -380,10 +517,10 @@ final class AppModel: ObservableObject {
                         }
                         library.clips[clipIndex].segments[segmentIndex] = segment
                         work?.completed += 1
-                        persist()
+                        persistSoon()
                     }
                     library.clips[clipIndex].indexedAt = Date(); library.clips[clipIndex].indexError = nil
-                    persist()
+                    persistSoon()
                     await engine.purge()
                     try await Task.sleep(for: .milliseconds(60))
                 }
@@ -548,7 +685,9 @@ final class AppModel: ObservableObject {
     }
     func shutdown() {
         searchTask?.cancel(); workTask?.cancel(); stopPreview()
-        for url in accessURLs { url.stopAccessingSecurityScopedResource() }
+        for (_, url) in accessURLs { url.stopAccessingSecurityScopedResource() }
+        accessURLs.removeAll()
+        flushSaves()
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         Task { await engine.stop() }
     }

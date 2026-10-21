@@ -1,77 +1,93 @@
 # Carfo
 
-Aplikasi menu bar macOS untuk mencari footage video berdasarkan gambar, isi percakapan, dan suara. Dibangun dengan SwiftUI dan AppKit mengikuti empat frame desain Pencil milik pengguna.
+Cari video, gambar, dan audio di Mac berdasarkan isi medianya.
 
-Pemrosesan selalu memakai **Google Embedding (EmbeddingGemma 2) secara lokal melalui MLX**. Tidak ada API key, server HTTP, pengiriman footage, atau unduhan manual. Model dan runtime sudah siap dan disertakan secara otomatis, sehingga pengaturan model tidak perlu ditampilkan di aplikasi.
+Carfo adalah aplikasi menu bar macOS untuk menemukan footage dari deskripsi adegan, kutipan percakapan, atau bunyi yang Anda ingat. Buka panel pencarian, ketik kueri, lalu tinjau hasil dan posisi waktunya sebelum membuka file asli.
 
-## Menjalankan
+Carfo memproses media secara lokal di Mac dan dapat digunakan secara offline. Komponen pemrosesan sudah disertakan dalam aplikasi, sehingga Anda cukup menginstal aplikasi dan menambahkan folder koleksi.
 
-1. Buka `build/Carfo.app`. Aplikasi juga dapat dipindahkan ke `/Applications`.
-2. Buka Pengaturan dengan `⌘,` untuk mengelola folder footage Anda.
-3. Klik **Indeks footage**. Proses ini membuat thumbnail dan embedding di Mac.
-4. Buka pencarian dengan `⌥Space`, pilih Gambar, Dialog, atau Suara, lalu tulis deskripsi.
+Repositori ini digunakan untuk membagikan aplikasi Carfo dalam format DMG. Source code tidak disertakan.
 
-Saat koleksi belum diindeks, pencarian tetap dapat mencari nama file. Pencarian semantik menampilkan hasil terdekat dari segmen yang sudah diindeks, tanpa menyajikan skor sebagai persentase kepastian.
+## Mode pencarian
 
-## Kebutuhan dan ukuran
+| Mode | Media yang dicari | Contoh kueri |
+| --- | --- | --- |
+| Video | Isi visual dan audio dalam video | `orang berjalan di pantai` |
+| Gambar | Isi file gambar | `mobil merah di jalan` |
+| Dialog | Ucapan dalam video atau audio, dengan kutipan dan timestamp jika transkrip tersedia | `kita mulai syuting besok` |
+| Suara | Bunyi dalam file audio dan video yang memiliki trek audio | `suara hujan dan petir` |
 
-- Mac Apple Silicon, macOS 14 atau lebih baru.
-- Runtime Python MLX dan model Google EmbeddingGemma 2 (sudah disertakan saat distribusi DMG atau dideteksi otomatis di Mac).
-- Aplikasi native ringan dengan konsumsi resource efisien.
+Kueri di atas adalah contoh penggunaan. Hasil bergantung pada isi koleksi dan progres pengindeksan media Anda.
 
-Lokasi model dan runtime dideteksi otomatis dari bundle aplikasi (`Contents/Resources/Model`, `Contents/Resources/Python`) maupun cache lokal:
+## Fitur
 
-```text
-Contents/Resources/Model (di dalam paket aplikasi/DMG)
-~/.cache/huggingface/hub/models--google--embeddinggemma-2/snapshots/...
-~/.cache/huggingface/hub/models--unsloth--embeddinggemma-2/snapshots/...
-~/.unsloth/studio/unsloth_studio/bin/python
-```
+- Panel pencarian mengambang dengan pintasan global `⌥Spasi`.
+- Koleksi dari beberapa folder beserta subfoldernya, dengan filter pencarian per folder.
+- Pencarian nama file setelah pemindaian, termasuk saat pengindeksan isi media belum selesai.
+- Pencarian dialog berdasarkan kata atau kemiripan makna, dengan konteks percakapan di sekitar kutipan.
+- Preview video dan audio pada segmen yang ditemukan, akses ke Finder, serta seret file ke aplikasi lain.
+- Pengindeksan bertahap yang menyimpan progres dan dapat dilanjutkan setelah dihentikan.
+- Tema terang, gelap, atau mengikuti sistem, serta pilihan membuka aplikasi saat login.
 
-## Kontrol
+## Persyaratan
 
-| Kontrol | Tindakan |
+- Mac dengan Apple Silicon dan macOS 14 atau lebih baru.
+- Ruang penyimpanan untuk aplikasi, indeks koleksi, dan thumbnail. Kebutuhannya bergantung pada ukuran koleksi media.
+
+Anda tidak perlu menginstal Python, menyiapkan API key, atau menjalankan server.
+
+## Unduh dan instal
+
+1. Unduh file `.dmg` Carfo yang tersedia di halaman GitHub ini.
+2. Buka file `.dmg` tersebut melalui Finder.
+3. Seret `Carfo.app` ke folder Applications.
+4. Setelah penyalinan selesai, keluarkan disk image Carfo dari Finder.
+5. Buka Carfo dari folder Applications. Ikon Carfo akan muncul di menu bar.
+
+## Cara penggunaan
+
+1. Klik ikon Carfo di menu bar dan buka Pengaturan. Saat Carfo aktif, Anda juga dapat memakai `⌘,`.
+2. Klik **Tambah folder** dan pilih folder media. Carfo akan memindai dan mengindeks koleksi tersebut.
+3. Tunggu pengindeksan selesai untuk mencari berdasarkan isi media. File yang sudah dipindai tetap dapat dicari berdasarkan namanya selama proses berjalan.
+4. Tekan `⌥Spasi`, pilih mode pencarian, lalu ketik kueri.
+5. Pilih hasil untuk meninjau preview. Tekan `Return` untuk membuka file asli atau `⌘Return` untuk menampilkannya di Finder.
+
+Gunakan **Pindai ulang** di Pengaturan setelah menambah, mengubah, atau menghapus media di folder koleksi. Tombol ini juga melanjutkan pengindeksan file yang belum selesai. Anda dapat menghentikan pengindeksan; progres yang sudah tersimpan tetap tersedia.
+
+### Pintasan
+
+Selain pintasan global pembuka, kontrol berikut berlaku saat panel Carfo aktif.
+
+| Pintasan | Tindakan |
 | --- | --- |
-| `⌥Space` | Buka atau tutup pencarian dari aplikasi mana pun |
-| `↑` / `↓` | Pilih hasil |
-| `Tab`, lalu `Space` pada hasil | Putar atau jeda preview |
-| `⌃P` | Putar atau jeda preview saat mengetik |
-| `Return` | Buka file asli menggunakan aplikasi default macOS |
+| `⌥Spasi` | Buka atau tutup panel pencarian dari aplikasi lain |
+| `↑` / `↓` | Pilih hasil sebelumnya atau berikutnya |
+| `⌃P` | Putar atau jeda preview video/audio |
+| `Return` | Buka file asli dengan aplikasi default macOS |
 | `⌘Return` | Tampilkan file di Finder |
-| `Escape` | Tutup panel |
-| `⌘,` | Buka pengaturan |
-| Klik kanan hasil | Buka file, tampilkan di Finder, atau salin lokasi |
-| Seret hasil | Seret file video ke aplikasi lain |
+| `Escape` saat mengetik | Hapus kueri; tutup panel bila kueri sudah kosong |
+| `⌘,` | Buka Pengaturan |
 
-Pintasan pembuka dapat diubah agar tidak mengambil alih `⌘Space` milik Spotlight. Pilihan terang, gelap, dan sistem hanya mengubah tampilan Carfo. Buka saat login menggunakan `SMAppService`; fitur ini tidak otomatis diaktifkan.
+Pintasan pembuka dapat diganti menjadi `⌃⌥Spasi` atau `⌃Spasi` di Pengaturan. Klik kanan pada hasil untuk tindakan file; hasil dialog juga menyediakan salinan kutipan.
 
-## Cara indeks bekerja
+## Privasi dan penyimpanan
 
-Video dibagi menjadi segmen 12 detik. Tiga frame dari setiap segmen diolah bersama oleh encoder visual. Trek audio dipotong menjadi WAV mono 16 kHz dan diolah oleh encoder audio model yang sama. Dialog mencari isi ucapan secara semantik; aplikasi tidak membuat transkrip kata demi kata. Suara mencari kemiripan bunyi atau suasana dari embedding audio.
+Pemrosesan media dan pencarian berjalan secara lokal. File media Anda tidak dikirim ke server.
 
-Embedding 768 dimensi dinormalisasi dan dibandingkan menggunakan cosine similarity. Satu hasil terbaik ditampilkan per file, beserta posisi segmennya. Preview melompat ke segmen tersebut. Membuka file dengan aplikasi lain tetap membuka file asli.
+Indeks, transkrip, thumbnail, dan log disimpan di `~/Library/Application Support/Carfo/`. File asli tetap berada di folder Anda dan tidak dipindahkan atau diubah. Mengeluarkan folder dari koleksi Carfo tidak menghapus file aslinya.
 
-Indeks, thumbnail, dan log mesin disimpan di `~/Library/Application Support/Carfo/`. File asli tidak dipindahkan atau diubah. Progres disimpan sesudah setiap embedding sehingga pengindeksan dapat dilanjutkan setelah dihentikan. Pindai ulang untuk mendeteksi perubahan atau penghapusan video.
+## Batasan dan pemecahan masalah
 
-Format video mengikuti dukungan decoder macOS, terutama MOV, MP4, dan M4V. File lain yang tidak dapat dibaca dilaporkan. Sampling tiga frame dapat melewatkan peristiwa visual yang sangat singkat; timestamp hasil menunjuk segmen, bukan deteksi batas adegan presisi.
+| Kondisi | Penjelasan atau langkah berikutnya |
+| --- | --- |
+| Hanya nama file yang cocok | Tunggu pengindeksan selesai. Jika proses terhenti, gunakan Pindai ulang dan periksa pesan error yang muncul. |
+| Dialog belum memiliki kutipan | Tunggu transkripsi selesai dan pastikan media memiliki ucapan yang dapat dikenali. |
+| Folder atau file tidak dapat dibuka | Pilih ulang folder untuk memperbarui akses. Jalankan Pindai ulang setelah perubahan isi folder. |
+| File gagal dibaca atau diindeks | Beberapa format atau codec belum dapat diproses. Sertakan format file dan pesan error saat melaporkan masalah. |
+| Adegan singkat terlewat | Carfo mengambil sampel gambar dari video. Kejadian yang sangat singkat dapat terlewat, dan timestamp menunjukkan segmen perkiraan. |
 
-## Build dan pengujian
+Hasil pencarian berdasarkan kemiripan isi bukan jaminan kecocokan. Kualitas transkrip dan posisi waktunya bergantung pada kejernihan audio. Buka preview untuk memeriksa hasil sebelum menggunakan medianya.
 
-Tidak ada dependency Swift dari jaringan.
+## Melaporkan masalah
 
-```sh
-zsh scripts/build-app.sh
-swift test --cache-path .build/Cache --config-path .build/Configuration --security-path .build/Security --disable-sandbox
-```
-
-Build menghasilkan aplikasi dengan tanda tangan ad hoc untuk penggunaan lokal. Distribusi publik memerlukan penandatanganan Developer ID dan notarization.
-
-Untuk menyiapkan ulang aplikasi validasi dengan video sintetis:
-
-```sh
-python3 scripts/prepare-validation.py
-```
-
-Skrip ini memerlukan FFmpeg untuk membuat fixture uji. Buka `.runtime/Carfo Check.app` melalui Finder; hasil akan ditulis ke `.runtime/NativeValidation/self-test.json`.
-
-Referensi model: [dokumentasi Google](https://ai.google.dev/gemma/docs/embeddinggemma), [model Unsloth](https://huggingface.co/unsloth/embeddinggemma-2).
+Saat melaporkan masalah, sertakan versi Carfo, versi macOS, jenis chip Mac, langkah untuk mengulangi masalah, dan pesan error yang muncul. Jika terkait media tertentu, sertakan format file serta contoh yang boleh dibagikan.

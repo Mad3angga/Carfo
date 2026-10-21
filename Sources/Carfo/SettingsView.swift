@@ -402,7 +402,7 @@ struct SettingsView: View {
                         Spacer()
 
                         Button {
-                            model.scanFolders(autoIndex: true)
+                            model.scanFolders(autoIndex: true, force: true)
                         } label: {
                             HStack(spacing: 6) {
                                 Image(systemName: "arrow.clockwise")
