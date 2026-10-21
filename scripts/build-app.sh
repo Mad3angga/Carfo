@@ -14,6 +14,7 @@ mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
 cp "$PROJECT_ROOT/.build/release/Carfo" "$APP_PATH/Contents/MacOS/Carfo"
 cp "$PROJECT_ROOT/Support/Info.plist" "$APP_PATH/Contents/Info.plist"
 cp "$PROJECT_ROOT/Support/Carfo.icns" "$APP_PATH/Contents/Resources/Carfo.icns"
+cp "$PROJECT_ROOT/Support/Carfo.icns" "$APP_PATH/Contents/Resources/Carfo"
 cp -R "$PROJECT_ROOT/Sources/Carfo/Resources/Engine" "$APP_PATH/Contents/Resources/"
 cp "$PROJECT_ROOT/Sources/Carfo/Resources/CarfoIcon.png" "$APP_PATH/Contents/Resources/" 2>/dev/null || true
 cp "$PROJECT_ROOT/Sources/Carfo/Resources/CarfoMenuBarIcon.png" "$APP_PATH/Contents/Resources/" 2>/dev/null || true
@@ -27,12 +28,14 @@ WHISPER_SRC="/Users/apple/.cache/huggingface/hub/models--mlx-community--whisper-
 
 if [[ -d "$MODEL_SRC" ]]; then
     print "==> 3. Bundling EmbeddingGemma 2 Model into app..."
+    rm -rf "$APP_PATH/Contents/Resources/Model"
     mkdir -p "$APP_PATH/Contents/Resources/Model"
     cp -RL "$MODEL_SRC"/* "$APP_PATH/Contents/Resources/Model/"
 fi
 
 if [[ -d "$WHISPER_SRC" ]]; then
     print "==> 4. Bundling Whisper MLX Model into app..."
+    rm -rf "$APP_PATH/Contents/Resources/Whisper"
     mkdir -p "$APP_PATH/Contents/Resources/Whisper"
     cp -RL "$WHISPER_SRC"/* "$APP_PATH/Contents/Resources/Whisper/"
 fi

@@ -7,11 +7,37 @@ import SwiftUI
 enum CarfoApplication {
     @MainActor static func main() {
         let app = NSApplication.shared
+        setupApplicationIcon(app)
         let delegate = AppDelegate()
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
         app.run()
         withExtendedLifetime(delegate) {}
+    }
+
+    @MainActor private static func setupApplicationIcon(_ app: NSApplication) {
+        let icon: NSImage? = {
+            if let url = Bundle.module.url(forResource: "Carfo", withExtension: "icns"),
+               let image = NSImage(contentsOf: url) {
+                return image
+            }
+            if let url = Bundle.module.url(forResource: "CarfoIcon", withExtension: "png"),
+               let image = NSImage(contentsOf: url) {
+                return image
+            }
+            if let path = Bundle.main.path(forResource: "Carfo", ofType: "icns") ?? Bundle.main.path(forResource: "CarfoIcon", ofType: "png"),
+               let image = NSImage(contentsOfFile: path) {
+                return image
+            }
+            return NSImage(named: "Carfo") ?? NSImage(named: "CarfoIcon")
+        }()
+
+        guard let icon else { return }
+        app.applicationIconImage = icon
+
+        if let executablePath = Bundle.main.executablePath {
+            NSWorkspace.shared.setIcon(icon, forFile: executablePath, options: [])
+        }
     }
 }
 
