@@ -1,4 +1,4 @@
-# Carfo
+<img width="2880" height="1870" alt="image" src="https://github.com/user-attachments/assets/d9d1de20-8ed2-4a03-bee2-1e3c3da5164a" /># Carfo
 
 Cari video, gambar, dan audio di Mac berdasarkan isi medianya.
 
@@ -16,6 +16,10 @@ Repositori ini digunakan untuk membagikan aplikasi Carfo dalam format DMG. Sourc
 | Gambar | Isi file gambar | `mobil merah di jalan` |
 | Dialog | Ucapan dalam video atau audio, dengan kutipan dan timestamp jika transkrip tersedia | `kita mulai syuting besok` |
 | Suara | Bunyi dalam file audio dan video yang memiliki trek audio | `suara hujan dan petir` |
+
+<img width="2880" height="1870" alt="image" src="https://github.com/user-attachments/assets/10b0d80a-b235-489c-9c67-42e311b935a6" />
+<img width="2880" height="1870" alt="image" src="https://github.com/user-attachments/assets/9c36a637-381f-457a-9e9c-e4a3b0b31290" />
+<img width="1800" height="1048" alt="image" src="https://github.com/user-attachments/assets/8dcd8992-8e05-4f80-8cc8-3bc0c009af0e" />
 
 Kueri di atas adalah contoh penggunaan. Hasil bergantung pada isi koleksi dan progres pengindeksan media Anda.
 
@@ -75,19 +79,3 @@ Pintasan pembuka dapat diganti menjadi `⌃⌥Spasi` atau `⌃Spasi` di Pengatur
 Pemrosesan media dan pencarian berjalan secara lokal. File media Anda tidak dikirim ke server.
 
 Indeks, transkrip, thumbnail, dan log disimpan di `~/Library/Application Support/Carfo/`. File asli tetap berada di folder Anda dan tidak dipindahkan atau diubah. Mengeluarkan folder dari koleksi Carfo tidak menghapus file aslinya.
-
-## Batasan dan pemecahan masalah
-
-| Kondisi | Penjelasan atau langkah berikutnya |
-| --- | --- |
-| Hanya nama file yang cocok | Tunggu pengindeksan selesai. Jika proses terhenti, gunakan Pindai ulang dan periksa pesan error yang muncul. |
-| Dialog belum memiliki kutipan | Tunggu transkripsi selesai dan pastikan media memiliki ucapan yang dapat dikenali. |
-| Folder atau file tidak dapat dibuka | Pilih ulang folder untuk memperbarui akses. Jalankan Pindai ulang setelah perubahan isi folder. |
-| File gagal dibaca atau diindeks | Beberapa format atau codec belum dapat diproses. Sertakan format file dan pesan error saat melaporkan masalah. |
-| Adegan singkat terlewat | Carfo mengambil sampel gambar dari video. Kejadian yang sangat singkat dapat terlewat, dan timestamp menunjukkan segmen perkiraan. |
-
-Hasil pencarian berdasarkan kemiripan isi bukan jaminan kecocokan. Kualitas transkrip dan posisi waktunya bergantung pada kejernihan audio. Buka preview untuk memeriksa hasil sebelum menggunakan medianya.
-
-## Melaporkan masalah
-
-Saat melaporkan masalah, sertakan versi Carfo, versi macOS, jenis chip Mac, langkah untuk mengulangi masalah, dan pesan error yang muncul. Jika terkait media tertentu, sertakan format file serta contoh yang boleh dibagikan.
