@@ -40,7 +40,7 @@ class Transcriber:
     def __init__(self, directory):
         self.directory = Path(directory).resolve() if directory else None
 
-    def transcribe(self, request):
+    def transcribe(self, request: dict[str, Any]) -> dict[str, Any]:
         if self.directory is None or not (self.directory / "config.json").exists():
             raise RuntimeError("Model transkripsi Whisper belum ditemukan. Siapkan mlx-community/whisper-small-mlx di Mac ini.")
         try:
@@ -106,7 +106,7 @@ class EmbeddingEngine:
                 pass
         import gc; gc.collect()
 
-    def encode(self, request):
+    def encode(self, request: dict[str, Any]) -> dict[str, Any]:
         self.load()
         op = request["op"]
         if op == "texts":
@@ -195,6 +195,7 @@ def main():
         try:
             request = json.loads(line)
             req_id = request.get("id")
+            response: dict[str, Any]
             with contextlib.redirect_stdout(sys.stderr):
                 if request.get("op") == "transcribe":
                     response = transcriber.transcribe(request)

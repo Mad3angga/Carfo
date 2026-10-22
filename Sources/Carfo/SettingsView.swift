@@ -438,15 +438,6 @@ struct SettingsView: View {
                         .padding(.top, 4)
                     }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Menghapus folder dari koleksi tidak menghapus file asli.")
-                            .font(CarfoDesign.font(11))
-                            .foregroundStyle(CarfoDesign.secondary)
-
-                        Text("Jika ada file baru dalam folder, silakan pindai ulang.")
-                            .font(CarfoDesign.font(11))
-                            .foregroundStyle(CarfoDesign.secondary)
-                    }
                 }
 
                 // Section 2: Tampilan & pintasan
@@ -547,6 +538,9 @@ struct SettingsView: View {
                     )
                 }
 
+                // Section 3: FAQ
+                SettingsFAQView(isDark: isDark)
+
                 if let notice = model.notice {
                     HStack(alignment: .top, spacing: 9) {
                         Image(systemName: "info.circle")
@@ -577,3 +571,90 @@ struct SettingsView: View {
         } message: { Text("File video asli tetap disimpan. Indeks folder ini akan dikeluarkan dari Carfo.") }
     }
 }
+
+struct SettingsFAQView: View {
+    let isDark: Bool
+    @State private var expandedItems: Set<Int> = []
+
+    private struct FAQItem: Identifiable {
+        let id: Int
+        let question: String
+        let answer: String
+    }
+
+    private let items: [FAQItem] = [
+        FAQItem(
+            id: 0,
+            question: "Apakah file asli ikut terhapus saat folder dihapus dari koleksi?",
+            answer: "Tidak. File asli tetap berada di folder Anda."
+        ),
+        FAQItem(
+            id: 1,
+            question: "Bagaimana memperbarui koleksi saat ada file baru?",
+            answer: "Klik tombol 'Pindai ulang' untuk mendeteksi dan mengindeks file baru yang ditambahkan ke folder Anda."
+        )
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("FAQ")
+                .font(CarfoDesign.font(13.5, weight: .semibold))
+                .foregroundStyle(Color.primary)
+
+            VStack(spacing: 0) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                    if index > 0 {
+                        Divider()
+                            .overlay(isDark ? Color.white.opacity(0.08) : Color(red: 0.90, green: 0.92, blue: 0.94))
+                    }
+
+                    let isExpanded = expandedItems.contains(item.id)
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            if isExpanded {
+                                expandedItems.remove(item.id)
+                            } else {
+                                expandedItems.insert(item.id)
+                            }
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(alignment: .center, spacing: 12) {
+                                Text(item.question)
+                                    .font(CarfoDesign.font(13, weight: .medium))
+                                    .foregroundStyle(Color.primary)
+                                    .multilineTextAlignment(.leading)
+                                Spacer()
+                                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(CarfoDesign.secondary)
+                            }
+
+                            if isExpanded {
+                                Text(item.answer)
+                                    .font(CarfoDesign.font(12))
+                                    .foregroundStyle(CarfoDesign.secondary)
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isDark ? Color(red: 0.14, green: 0.155, blue: 0.18) : Color.white)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(isDark ? Color.white.opacity(0.10) : Color(red: 0.88, green: 0.90, blue: 0.93), lineWidth: 1)
+            )
+        }
+    }
+}
+
