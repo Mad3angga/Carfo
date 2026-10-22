@@ -16,14 +16,22 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 
-def read_pcm16_wav(path, max_seconds):
+def read_pcm16_wav(path, max_seconds, offset_seconds=0.0, duration_seconds=None):
     import numpy as np
     with wave.open(str(Path(path).resolve(strict=True)), "rb") as audio:
         if audio.getnchannels() != 1 or audio.getframerate() != 16000 or audio.getsampwidth() != 2:
             raise ValueError("Audio lokal harus berupa WAV mono 16 kHz PCM16.")
-        if audio.getnframes() > 16000 * max_seconds:
-            raise ValueError("Potongan audio terlalu panjang.")
-        return np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2").astype(np.float32) / 32768.0
+        framerate = audio.getframerate()
+        total_frames = audio.getnframes()
+        start_frame = int(offset_seconds * framerate)
+        if start_frame >= total_frames:
+            return np.zeros(0, dtype=np.float32)
+        audio.setpos(start_frame)
+        frames_to_read = total_frames - start_frame
+        if duration_seconds is not None:
+            frames_to_read = min(frames_to_read, int(duration_seconds * framerate))
+        frames_to_read = min(frames_to_read, int(framerate * max_seconds))
+        return np.frombuffer(audio.readframes(frames_to_read), dtype="<i2").astype(np.float32) / 32768.0
 
 
 class Transcriber:
@@ -39,7 +47,12 @@ class Transcriber:
             import mlx_whisper  # type: ignore
         except ImportError as error:
             raise RuntimeError("Paket mlx-whisper belum terpasang di runtime Python. " + str(error)) from error
-        samples = read_pcm16_wav(request["path"], max_seconds=4 * 3600)
+        offset = float(request.get("offset", 0.0))
+        duration = request.get("duration")
+        duration_sec = float(duration) if duration is not None else None
+        samples = read_pcm16_wav(request["path"], max_seconds=4 * 3600, offset_seconds=offset, duration_seconds=duration_sec)
+        if len(samples) == 0:
+            return {"cues": [], "language": None}
         language = request.get("language") or None
         result = mlx_whisper.transcribe(
             samples,
@@ -56,7 +69,7 @@ class Transcriber:
                 continue
             if float(segment.get("no_speech_prob", 0)) > 0.6 and float(segment.get("avg_logprob", 0)) < -1.0:
                 continue
-            cues.append({"start": start, "end": end, "text": text})
+            cues.append({"start": start + offset, "end": end + offset, "text": text})
         language_result = result.get("language")
         del samples, result
         import gc; gc.collect()
@@ -100,7 +113,20 @@ class EmbeddingEngine:
             texts = request.get("texts", [])
             if not 1 <= len(texts) <= 64:
                 raise ValueError("Satu permintaan harus berisi 1 hingga 64 teks.")
-            embeddings = [self.encode({"op": "text", "text": text})["embedding"] for text in texts]
+            try:
+                tokenizer = self.processor.tokenizer
+                encoded = tokenizer(texts, padding=True, truncation=True, max_length=2048, return_tensors="np")
+                inputs = {key: self.mx.array(encoded[key]) for key in ("input_ids", "attention_mask") if key in encoded}
+                result = self.model(**inputs).text_embeds
+                self.mx.eval(result)
+                vector = result.astype(self.mx.float32)
+                norm = self.mx.sqrt(self.mx.sum(vector * vector, axis=-1, keepdims=True))
+                vector = vector / (norm + 1e-12)
+                self.mx.eval(vector)
+                embeddings = vector.tolist()
+                del inputs, result, vector, norm
+            except Exception:
+                embeddings = [self.encode({"op": "text", "text": text})["embedding"] for text in texts]
             self.clear_cache()
             return {"embeddings": embeddings, "dimensions": 768}
         if op == "verify":
@@ -165,8 +191,10 @@ def main():
         engine = EmbeddingEngine(args.model)
         transcriber = Transcriber(args.whisper)
     for line in sys.stdin:
+        req_id = None
         try:
             request = json.loads(line)
+            req_id = request.get("id")
             with contextlib.redirect_stdout(sys.stderr):
                 if request.get("op") == "transcribe":
                     response = transcriber.transcribe(request)
@@ -179,6 +207,8 @@ def main():
         except Exception as error:
             traceback.print_exc(file=sys.stderr)
             response = {"ok": False, "error": str(error)}
+        if req_id is not None:
+            response["id"] = req_id
         print(json.dumps(response, ensure_ascii=False, allow_nan=False), flush=True)
 
 

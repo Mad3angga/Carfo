@@ -414,6 +414,7 @@ struct SettingsView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(model.isWorking)
+                        .help("Jika ada file baru dalam folder, silakan pindai ulang")
                     }
                     .padding(.top, 2)
 
@@ -437,9 +438,15 @@ struct SettingsView: View {
                         .padding(.top, 4)
                     }
 
-                    Text("Menghapus folder dari koleksi tidak menghapus file asli.")
-                        .font(CarfoDesign.font(11))
-                        .foregroundStyle(CarfoDesign.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Menghapus folder dari koleksi tidak menghapus file asli.")
+                            .font(CarfoDesign.font(11))
+                            .foregroundStyle(CarfoDesign.secondary)
+
+                        Text("Jika ada file baru dalam folder, silakan pindai ulang.")
+                            .font(CarfoDesign.font(11))
+                            .foregroundStyle(CarfoDesign.secondary)
+                    }
                 }
 
                 // Section 2: Tampilan & pintasan

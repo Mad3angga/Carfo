@@ -104,12 +104,20 @@ final class AppModel: ObservableObject {
     /// Serial, so snapshots reach disk in order without blocking the UI.
     private let saveQueue = DispatchQueue(label: "id.carfo.library-save", qos: .utility)
     private var accessURLs: [UUID: URL] = [:]
+    private var queryCacheOrder: [String] = []
     private var queryCache: [String: [Float]] = [:]
     private var endObserver: NSObjectProtocol?
     private var playbackObserver: NSKeyValueObservation?
+    public private(set) var loadFailed: Bool = false
     var isWorking: Bool { work != nil }
     var selected: SearchResult? { results.first { $0.id == selectedID } }
-    var indexMatchesModel: Bool { library.modelRevision == nil || library.modelRevision == installation.modelDirectory?.lastPathComponent }
+    var indexMatchesModel: Bool {
+        guard let currentModel = installation.modelIdentifier else { return true }
+        guard let savedModel = library.modelRevision else {
+            return library.clips.isEmpty || !library.clips.contains { $0.isIndexed }
+        }
+        return savedModel == currentModel
+    }
     var indexedCount: Int { indexMatchesModel ? stats.indexed : 0 }
     var transcribedCount: Int { stats.transcribed }
     var clipsNeedingTranscriptCount: Int { installation.canTranscribe ? stats.needsTranscript : 0 }
@@ -162,12 +170,17 @@ final class AppModel: ObservableObject {
         let script = Bundle.main.url(forResource: "worker", withExtension: "py", subdirectory: "Engine")
             ?? Bundle.module.url(forResource: "Engine", withExtension: nil)!.appendingPathComponent("worker.py")
         engine = LocalEngine(installation: detected, script: script, logDirectory: root)
-        do { library = try store.load() }
-        catch { notice = "Indeks tidak dapat dibaca: \(error.localizedDescription). File indeks tetap disimpan di \(store.manifestURL.path)." }
+        do {
+            library = try store.load()
+            loadFailed = false
+            let activeThumbnails = Set(library.clips.compactMap(\.thumbnail))
+            store.pruneThumbnails(keeping: activeThumbnails)
+        } catch {
+            loadFailed = true
+            notice = "Indeks tidak dapat dibaca: \(error.localizedDescription). File indeks tetap disimpan di \(store.manifestURL.path)."
+        }
         stats = LibraryStats(library.clips) // didSet does not run inside init
         store.cleanWorkingDirectories()
-        let activeThumbnails = Set(library.clips.compactMap(\.thumbnail))
-        store.pruneThumbnails(keeping: activeThumbnails)
         restoreFolderAccess()
         player.actionAtItemEnd = .pause
         playbackObserver = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
@@ -197,12 +210,24 @@ final class AppModel: ObservableObject {
             folderAccessError = "Salah satu folder tidak dapat dibuka. Pilih ulang folder untuk memperbarui aksesnya."
         }
     }
-    /// Saves now. Encoding the whole library takes hundreds of ms, so it runs on `saveQueue`, not the main thread.
+    private var dirtyClipIDs = Set<UUID>()
+
+    /// Saves now. If dirtyClipIDs are tracked and fewer than all clips, writes only those clips incrementally.
     func persist() {
+        guard !loadFailed else { return }
         saveTask?.cancel(); saveTask = nil
         let snapshot = library, store = store
+        let dirty = dirtyClipIDs
+        dirtyClipIDs.removeAll()
         saveQueue.async { [weak self] in
-            do { try store.save(snapshot) }
+            do {
+                if !dirty.isEmpty && dirty.count < snapshot.clips.count {
+                    let dirtyClips = snapshot.clips.filter { dirty.contains($0.id) }
+                    try store.saveClips(dirtyClips)
+                } else {
+                    try store.save(snapshot)
+                }
+            }
             catch {
                 let message = error.localizedDescription
                 Task { @MainActor in self?.notice = "Indeks belum tersimpan: \(message)" }
@@ -210,18 +235,38 @@ final class AppModel: ObservableObject {
         }
     }
     /// Coalesces the frequent saves made while scanning and indexing into one write every few seconds.
-    func persistSoon() {
+    func persistSoon(for clipID: UUID? = nil) {
+        guard !loadFailed else { return }
+        if let clipID { dirtyClipIDs.insert(clipID) }
         guard saveTask == nil else { return }
         saveTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(5))
+            try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled else { return }
             self?.persist()
         }
     }
     /// Writes any pending changes and waits until they are on disk. Used when quitting.
     func flushSaves() {
+        guard !loadFailed else { return }
         persist()
         saveQueue.sync {}
+    }
+    func recoverFromBackup() {
+        do {
+            library = try store.restoreBackup()
+            loadFailed = false
+            stats = LibraryStats(library.clips)
+            notice = "Indeks berhasil dipulihkan dari backup."
+        } catch {
+            notice = "Gagal memulihkan backup: \(error.localizedDescription)"
+        }
+    }
+    func resetCorruptedIndex() {
+        loadFailed = false
+        library = LibraryManifest()
+        stats = LibraryStats(library.clips)
+        persist()
+        notice = "Indeks telah disetel ulang."
     }
     func pickFolder() {
         guard !isWorking else { notice = "Tunggu proses selesai sebelum menambah folder."; return }
@@ -390,8 +435,13 @@ final class AppModel: ObservableObject {
                     library.clips[index].segments = SegmentPlanner.segments(duration: library.clips[index].duration)
                 }
                 library.clips[index].indexedAt = nil
+                // Invalidate transcript cue embeddings while preserving transcript text (CF-06)
+                for cueIndex in library.clips[index].transcripts.indices {
+                    library.clips[index].transcripts[cueIndex].embedding = nil
+                }
             }
-            library.modelRevision = installation.modelDirectory?.lastPathComponent
+            library.modelRevision = installation.modelIdentifier
+            queryCache.removeAll(); queryCacheOrder.removeAll()
             persist()
         }
         let canTranscribe = installation.canTranscribe
@@ -418,7 +468,7 @@ final class AppModel: ObservableObject {
             }
             do {
                 _ = try await engine.verify(); modelVerified = true; modelError = nil
-                library.modelRevision = installation.modelDirectory?.lastPathComponent
+                library.modelRevision = installation.modelIdentifier
                 for candidate in candidates {
                     guard let clipIndex = library.clips.firstIndex(where: { $0.id == candidate.id }) else { continue }
 
@@ -441,31 +491,43 @@ final class AppModel: ObservableObject {
                             }
                             library.clips[clipIndex].transcripts = cues
                             library.clips[clipIndex].transcribedAt = Date()
-                            persistSoon()
+                            library.clips[clipIndex].transcriptError = nil
+                            persistSoon(for: candidate.id)
                         } catch is CancellationError {
                             throw CancellationError()
                         } catch {
-                            library.clips[clipIndex].transcribedAt = Date()
-                            library.clips[clipIndex].indexError = error.localizedDescription
-                            persistSoon()
+                            // CF-03: Separate error, do not set transcribedAt so needsTranscript stays true for retry
+                            library.clips[clipIndex].transcriptError = error.localizedDescription
+                            persistSoon(for: candidate.id)
                         }
                         work?.completed += 1
                     }
 
-                    // Image indexing: embed the image file directly
+                    // Image indexing: embed the image file directly (or its rendered raster thumbnail for SVG)
                     if candidate.isImage {
                         for segmentIndex in library.clips[clipIndex].segments.indices {
                             try Task.checkCancellation()
                             var segment = library.clips[clipIndex].segments[segmentIndex]
                             if segment.visualEmbedding != nil { continue }
                             work?.detail = "\(candidate.name)"
-                            segment.visualEmbedding = try await engine.embed(frames: [candidate.url])
+                            let frameURL: URL
+                            if candidate.url.pathExtension.lowercased() == "svg" {
+                                let thumbName = candidate.thumbnail ?? "\(candidate.id.uuidString).jpg"
+                                let thumbURL = store.thumbnailDirectory.appendingPathComponent(thumbName)
+                                if !FileManager.default.fileExists(atPath: thumbURL.path) {
+                                    try? LibraryScanner.imageThumbnail(url: candidate.url, destination: thumbURL)
+                                }
+                                frameURL = FileManager.default.fileExists(atPath: thumbURL.path) ? thumbURL : candidate.url
+                            } else {
+                                frameURL = candidate.url
+                            }
+                            segment.visualEmbedding = try await engine.embed(frames: [frameURL])
                             library.clips[clipIndex].segments[segmentIndex] = segment
                             work?.completed += 1
-                            persistSoon()
+                            persistSoon(for: candidate.id)
                         }
                         library.clips[clipIndex].indexedAt = Date(); library.clips[clipIndex].indexError = nil
-                        persistSoon()
+                        persistSoon(for: candidate.id)
                         await engine.purge()
                         try await Task.sleep(for: .milliseconds(50))
                         continue
@@ -486,10 +548,10 @@ final class AppModel: ObservableObject {
                             segment.audioEmbedding = try await engine.embed(audio: wav)
                             library.clips[clipIndex].segments[segmentIndex] = segment
                             work?.completed += 1
-                            persistSoon()
+                            persistSoon(for: candidate.id)
                         }
                         library.clips[clipIndex].indexedAt = Date(); library.clips[clipIndex].indexError = nil
-                        persistSoon()
+                        persistSoon(for: candidate.id)
                         await engine.purge()
                         try await Task.sleep(for: .milliseconds(50))
                         continue
@@ -508,7 +570,7 @@ final class AppModel: ObservableObject {
                             let frames = try await MediaProcessor.frames(url: candidate.url, segment: segment, directory: temporary)
                             segment.visualEmbedding = try await engine.embed(frames: frames)
                             library.clips[clipIndex].segments[segmentIndex] = segment
-                            persistSoon()
+                            persistSoon(for: candidate.id)
                         }
                         if candidate.hasAudio && segment.audioEmbedding == nil {
                             let wav = temporary.appendingPathComponent("audio.wav")
@@ -517,10 +579,10 @@ final class AppModel: ObservableObject {
                         }
                         library.clips[clipIndex].segments[segmentIndex] = segment
                         work?.completed += 1
-                        persistSoon()
+                        persistSoon(for: candidate.id)
                     }
                     library.clips[clipIndex].indexedAt = Date(); library.clips[clipIndex].indexError = nil
-                    persistSoon()
+                    persistSoon(for: candidate.id)
                     await engine.purge()
                     try await Task.sleep(for: .milliseconds(60))
                 }
@@ -531,7 +593,10 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    func cancelWork() { workTask?.cancel() }
+    func cancelWork() {
+        workTask?.cancel()
+        Task { await engine.stop() }
+    }
     func verifyModel() {
         guard !modelChecking, !isWorking else { return }
         modelChecking = true; modelError = nil
@@ -550,11 +615,21 @@ final class AppModel: ObservableObject {
             Task { @MainActor in self?.updateInstallation(pythonPath: url.path) }
         }
     }
+    private func cacheQueryEmbedding(_ embedding: [Float], for key: String) {
+        if queryCache[key] == nil {
+            if queryCacheOrder.count >= 100 {
+                let oldest = queryCacheOrder.removeFirst()
+                queryCache.removeValue(forKey: oldest)
+            }
+            queryCacheOrder.append(key)
+        }
+        queryCache[key] = embedding
+    }
     private func updateInstallation(pythonPath: String? = nil) {
         guard !isWorking else { return }
         if let pythonPath { defaults.set(pythonPath, forKey: "pythonPath") }
         installation = .discover(pythonOverride: defaults.string(forKey: "pythonPath"))
-        modelVerified = false; modelError = nil; queryCache.removeAll()
+        modelVerified = false; modelError = nil; queryCache.removeAll(); queryCacheOrder.removeAll()
         let value = installation
         Task { await engine.configure(value) }
     }
@@ -571,58 +646,87 @@ final class AppModel: ObservableObject {
         if text.isEmpty && mode != .dialogue {
             isSearching = false; results = []; selectedID = nil; stopPreview(); return
         }
-        isSearching = true
         let selectedMode = mode, filter = folderFilter, clips = library.clips
-        searchTask = Task {
-            do {
-                if !text.isEmpty { try await Task.sleep(for: .milliseconds(250)) }
-                let hasVectors = clips.contains { clip in
-                    clip.segments.contains { seg in
-                        switch selectedMode {
-                        case .video: return clip.mediaType == .video && (seg.visualEmbedding != nil || seg.audioEmbedding != nil)
-                        case .visual: return clip.mediaType == .image && seg.visualEmbedding != nil
-                        case .sound: return (clip.mediaType == .audio || (clip.mediaType == .video && clip.hasAudio)) && seg.audioEmbedding != nil
-                        case .dialogue: return clip.hasAudio && seg.audioEmbedding != nil
-                        }
-                    }
+
+        // Phase 1 (Instant): Immediate filename and lexical text search without waiting for model
+        let instantMatches = SearchEngine.search(clips: clips, query: text, mode: selectedMode, folderID: filter)
+        results = instantMatches
+        semanticSearch = false
+        if selectedID == nil || !instantMatches.contains(where: { $0.id == selectedID }) {
+            select(instantMatches.first?.id)
+        }
+
+        let hasVectors = clips.contains { clip in
+            clip.segments.contains { seg in
+                switch selectedMode {
+                case .video: return clip.mediaType == .video && (seg.visualEmbedding != nil || seg.audioEmbedding != nil)
+                case .visual: return clip.mediaType == .image && seg.visualEmbedding != nil
+                case .sound: return (clip.mediaType == .audio || (clip.mediaType == .video && clip.hasAudio)) && seg.audioEmbedding != nil
+                case .dialogue: return clip.hasAudio && (seg.audioEmbedding != nil || clip.transcripts.contains { $0.embedding != nil })
                 }
+            }
+        }
+        let canDoSemantic = !text.isEmpty && installation.isAvailable && indexMatchesModel && (selectedMode == .dialogue || hasVectors)
+        guard canDoSemantic else {
+            isSearching = false
+            return
+        }
+
+        isSearching = true
+
+        // Phase 2 (Asynchronous): Semantic model embedding and vector reranking
+        searchTask = Task(priority: .userInitiated) {
+            do {
+                try await Task.sleep(for: .milliseconds(200))
+                try Task.checkCancellation()
+
                 var embedding: [Float]?
                 var textEmbedding: [Float]?
-                if !text.isEmpty && installation.isAvailable && indexMatchesModel {
-                    let key = selectedMode.rawValue + ":" + text
-                    if selectedMode == .dialogue {
-                        if let cached = queryCache[key] { textEmbedding = cached }
-                        else {
-                            textEmbedding = try await engine.embed(query: text, mode: .dialogue)
-                            if let textEmbedding {
-                                if queryCache.count >= 50 { queryCache.removeAll() }
-                                queryCache[key] = textEmbedding
-                            }
+                let key = selectedMode.rawValue + ":" + text
+                if selectedMode == .dialogue {
+                    if let cached = queryCache[key] { textEmbedding = cached }
+                    else {
+                        textEmbedding = try await engine.embed(query: text, mode: .dialogue)
+                        if let textEmbedding {
+                            cacheQueryEmbedding(textEmbedding, for: key)
                         }
-                    } else if hasVectors {
-                        if let cached = queryCache[key] { embedding = cached }
-                        else {
-                            embedding = try await engine.embed(query: text, mode: selectedMode)
-                            if let embedding {
-                                if queryCache.count >= 50 { queryCache.removeAll() }
-                                queryCache[key] = embedding
-                            }
+                    }
+                } else {
+                    if let cached = queryCache[key] { embedding = cached }
+                    else {
+                        embedding = try await engine.embed(query: text, mode: selectedMode)
+                        if let embedding {
+                            cacheQueryEmbedding(embedding, for: key)
                         }
                     }
                 }
                 try Task.checkCancellation()
+
                 let matches = await Task.detached(priority: .userInitiated) {
                     SearchEngine.search(clips: clips, query: text, mode: selectedMode, folderID: filter, embedding: embedding, textEmbedding: textEmbedding)
                 }.value
                 try Task.checkCancellation()
-                semanticSearch = embedding != nil || textEmbedding != nil; results = matches; isSearching = false
-                select(matches.first?.id)
+
+                // Guard against stale search results from an older query (CF-07)
+                guard self.query.trimmingCharacters(in: .whitespacesAndNewlines) == text && self.mode == selectedMode else { return }
+
+                semanticSearch = embedding != nil || textEmbedding != nil
+                results = matches
+                isSearching = false
+                if selectedID == nil || !matches.contains(where: { $0.id == selectedID }) {
+                    select(matches.first?.id)
+                }
             } catch is CancellationError { return }
             catch {
                 guard !Task.isCancelled else { return }
-                isSearching = false; semanticSearch = false; searchError = error.localizedDescription
-                results = SearchEngine.search(clips: clips, query: text, mode: selectedMode, folderID: filter)
-                select(results.first?.id)
+                guard self.query.trimmingCharacters(in: .whitespacesAndNewlines) == text && self.mode == selectedMode else { return }
+                isSearching = false
+                semanticSearch = false
+                searchError = error.localizedDescription
+                if results.isEmpty {
+                    results = instantMatches
+                    select(results.first?.id)
+                }
             }
         }
     }

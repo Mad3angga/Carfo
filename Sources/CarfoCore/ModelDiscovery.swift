@@ -6,6 +6,40 @@ public struct LocalModelInstallation: Equatable, Sendable {
     public var whisperDirectory: URL?
     public var isAvailable: Bool { modelDirectory != nil && pythonExecutable != nil }
     public var canTranscribe: Bool { isAvailable && whisperDirectory != nil }
+    public var modelIdentifier: String? {
+        guard let dir = modelDirectory else { return nil }
+        return Self.computeModelIdentifier(for: dir)
+    }
+    public static func computeModelIdentifier(for directory: URL) -> String {
+        if let data = try? Data(contentsOf: directory.appendingPathComponent("revision.txt")),
+           let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            return text
+        }
+        if let data = try? Data(contentsOf: directory.appendingPathComponent("carfo-model.json")),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let rev = json["revision"] as? String ?? json["id"] as? String, !rev.isEmpty {
+            return rev
+        }
+        let name = directory.lastPathComponent
+        if name.count >= 32 && name.allSatisfy({ $0.isHexDigit }) {
+            return name
+        }
+        var parts: [String] = [name]
+        if let configData = try? Data(contentsOf: directory.appendingPathComponent("config.json")) {
+            var hash: UInt64 = 0xcbf29ce484222325
+            for byte in configData {
+                hash ^= UInt64(byte)
+                hash &*= 0x100000001b3
+            }
+            parts.append(String(format: "%016llx", hash))
+        }
+        let weightsPath = directory.appendingPathComponent("model.safetensors").path
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: weightsPath),
+           let size = attrs[.size] as? Int64 {
+            parts.append("w\(size)")
+        }
+        return parts.joined(separator: "-")
+    }
     public init(modelDirectory: URL? = nil, pythonExecutable: URL? = nil, whisperDirectory: URL? = nil) {
         self.modelDirectory = modelDirectory; self.pythonExecutable = pythonExecutable; self.whisperDirectory = whisperDirectory
     }

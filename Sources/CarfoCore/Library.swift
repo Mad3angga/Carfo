@@ -122,6 +122,7 @@ public struct FootageClip: Codable, Identifiable, Equatable, Sendable {
     public var transcripts: [TranscriptCue]
     /// Set once speech-to-text (or a sidecar subtitle) has produced `transcripts`, even if the clip has no speech.
     public var transcribedAt: Date?
+    public var transcriptError: String?
     public var indexedAt: Date?
     public var indexError: String?
     public var mediaType: MediaType
@@ -132,21 +133,21 @@ public struct FootageClip: Codable, Identifiable, Equatable, Sendable {
     public var isVideo: Bool { mediaType == .video }
     public var isIndexed: Bool {
         switch mediaType {
-        case .image: return segments.contains { $0.visualEmbedding != nil }
-        case .audio: return segments.contains { $0.audioEmbedding != nil }
+        case .image: return !segments.isEmpty && segments.allSatisfy { $0.visualEmbedding != nil }
+        case .audio: return !segments.isEmpty && segments.allSatisfy { $0.audioEmbedding != nil }
         case .video: return !segments.isEmpty && segments.allSatisfy { $0.visualEmbedding != nil && (!hasAudio || $0.audioEmbedding != nil) }
         }
     }
     public var needsTranscript: Bool { hasAudio && (transcribedAt == nil || transcripts.contains { $0.embedding == nil }) }
-    public init(id: UUID = UUID(), folderID: UUID, path: String, relativePath: String = "", fileSize: Int64 = 0, modifiedAt: Date = Date(), duration: Double, width: Int = 0, height: Int = 0, frameRate: Double = 0, hasAudio: Bool = false, thumbnail: String? = nil, segments: [VideoSegment] = [], indexedAt: Date? = nil, indexError: String? = nil, transcripts: [TranscriptCue] = [], transcribedAt: Date? = nil, mediaType: MediaType = .video) {
+    public init(id: UUID = UUID(), folderID: UUID, path: String, relativePath: String = "", fileSize: Int64 = 0, modifiedAt: Date = Date(), duration: Double, width: Int = 0, height: Int = 0, frameRate: Double = 0, hasAudio: Bool = false, thumbnail: String? = nil, segments: [VideoSegment] = [], indexedAt: Date? = nil, indexError: String? = nil, transcripts: [TranscriptCue] = [], transcribedAt: Date? = nil, transcriptError: String? = nil, mediaType: MediaType = .video) {
         self.id = id; self.folderID = folderID; self.path = path; self.relativePath = relativePath
         self.fileSize = fileSize; self.modifiedAt = modifiedAt; self.duration = duration
         self.width = width; self.height = height; self.frameRate = frameRate; self.hasAudio = hasAudio
         self.thumbnail = thumbnail; self.segments = segments; self.indexedAt = indexedAt; self.indexError = indexError
-        self.transcripts = transcripts; self.transcribedAt = transcribedAt; self.mediaType = mediaType
+        self.transcripts = transcripts; self.transcribedAt = transcribedAt; self.transcriptError = transcriptError; self.mediaType = mediaType
     }
     enum CodingKeys: String, CodingKey {
-        case id, folderID, path, relativePath, fileSize, modifiedAt, duration, width, height, frameRate, hasAudio, thumbnail, segments, indexedAt, indexError, transcripts, transcribedAt, mediaType
+        case id, folderID, path, relativePath, fileSize, modifiedAt, duration, width, height, frameRate, hasAudio, thumbnail, segments, indexedAt, indexError, transcripts, transcribedAt, transcriptError, mediaType
     }
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -167,6 +168,7 @@ public struct FootageClip: Codable, Identifiable, Equatable, Sendable {
         indexError = try container.decodeIfPresent(String.self, forKey: .indexError)
         transcripts = try container.decodeIfPresent([TranscriptCue].self, forKey: .transcripts) ?? []
         transcribedAt = try container.decodeIfPresent(Date.self, forKey: .transcribedAt)
+        transcriptError = try container.decodeIfPresent(String.self, forKey: .transcriptError)
         mediaType = try container.decodeIfPresent(MediaType.self, forKey: .mediaType)
             ?? MediaType.from(extension: URL(fileURLWithPath: path).pathExtension)
     }
@@ -257,24 +259,160 @@ public struct LibraryStore: Sendable {
     }
     public var thumbnailDirectory: URL { directory.appendingPathComponent("Thumbnails", isDirectory: true) }
     public var workingDirectory: URL { directory.appendingPathComponent("Working", isDirectory: true) }
+    public var databaseURL: URL { directory.appendingPathComponent("library.sqlite3") }
+    public var databaseBackupURL: URL { directory.appendingPathComponent("library.sqlite3.backup") }
     public var manifestURL: URL { directory.appendingPathComponent("library.json") }
-    public func load() throws -> LibraryManifest {
-        guard FileManager.default.fileExists(atPath: manifestURL.path) else { return LibraryManifest() }
-        let manifest = try JSONDecoder().decode(LibraryManifest.self, from: Data(contentsOf: manifestURL))
-        guard manifest.version == 1 else { throw LibraryError.unsupportedVersion }
-        return manifest
+    public var backupURL: URL { directory.appendingPathComponent("library.json.backup") }
+
+    public func database() throws -> LibraryDatabase {
+        try LibraryDatabase(url: databaseURL)
     }
+
+    public func load() throws -> LibraryManifest {
+        // If manifestURL exists and is non-empty, ensure it's valid JSON (protect against corrupt files)
+        if FileManager.default.fileExists(atPath: manifestURL.path) {
+            let data = try Data(contentsOf: manifestURL)
+            if !data.isEmpty {
+                let manifest = try JSONDecoder().decode(LibraryManifest.self, from: data)
+                guard manifest.version == 1 else { throw LibraryError.unsupportedVersion }
+            }
+        }
+
+        // 1. If SQLite database exists, load from SQLite
+        if FileManager.default.fileExists(atPath: databaseURL.path) {
+            let db = try LibraryDatabase(url: databaseURL)
+            guard db.checkIntegrity() else {
+                db.close()
+                throw LibraryError.corrupted
+            }
+            return try db.loadManifest()
+        }
+
+        // 2. If SQLite database does not exist, but library.json exists: migrate from JSON to SQLite
+        if FileManager.default.fileExists(atPath: manifestURL.path) {
+            let data = try Data(contentsOf: manifestURL)
+            guard !data.isEmpty else { return LibraryManifest() }
+            let manifest = try JSONDecoder().decode(LibraryManifest.self, from: data)
+            guard manifest.version == 1 else { throw LibraryError.unsupportedVersion }
+
+            // Create initial JSON backup prior to migration
+            try? data.write(to: backupURL, options: .atomic)
+
+            // Safe migration via temp database
+            let tempURL = directory.appendingPathComponent("library.sqlite3.migration")
+            if FileManager.default.fileExists(atPath: tempURL.path) {
+                try? FileManager.default.removeItem(at: tempURL)
+            }
+            do {
+                let tempDb = try LibraryDatabase(url: tempURL)
+                try tempDb.saveManifest(manifest)
+                guard tempDb.checkIntegrity() else {
+                    tempDb.close()
+                    try? FileManager.default.removeItem(at: tempURL)
+                    throw LibraryError.corrupted
+                }
+                tempDb.close()
+                try FileManager.default.moveItem(at: tempURL, to: databaseURL)
+                let db = try LibraryDatabase(url: databaseURL)
+                try? db.createBackup(to: databaseBackupURL)
+            } catch {
+                try? FileManager.default.removeItem(at: tempURL)
+                throw error
+            }
+            return manifest
+        }
+
+        return LibraryManifest()
+    }
+
     public func save(_ manifest: LibraryManifest) throws {
+        // 1. Persist to SQLite database
+        let db = try LibraryDatabase(url: databaseURL)
+        try db.saveManifest(manifest)
+        try? db.createBackup(to: databaseBackupURL)
+
+        // 2. Export / sync JSON and backup for backward compatibility & safety
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        try encoder.encode(manifest).write(to: manifestURL, options: .atomic)
+        let data = try encoder.encode(manifest)
+        try data.write(to: manifestURL, options: .atomic)
+        try? data.write(to: backupURL, options: .atomic)
     }
+
+    /// Incremental save of a single clip and its segments/cues without rewriting the entire database.
+    public func saveClip(_ clip: FootageClip) throws {
+        let db = try LibraryDatabase(url: databaseURL)
+        try db.saveClip(clip)
+    }
+
+    /// Incremental save of multiple dirty clips without rewriting the entire database.
+    public func saveClips(_ clips: [FootageClip]) throws {
+        guard !clips.isEmpty else { return }
+        let db = try LibraryDatabase(url: databaseURL)
+        try db.saveClips(clips)
+    }
+
+    /// Incremental save of a single segment and its cues.
+    public func saveSegment(clipID: UUID, segment: VideoSegment) throws {
+        let db = try LibraryDatabase(url: databaseURL)
+        try db.saveSegment(clipID: clipID, segment: segment)
+    }
+
+    /// Incremental save of a folder.
+    public func saveFolder(_ folder: FootageFolder) throws {
+        let db = try LibraryDatabase(url: databaseURL)
+        try db.saveFolder(folder)
+    }
+
+    /// Incremental removal of a folder and its clips.
+    public func removeFolder(id: UUID) throws {
+        let db = try LibraryDatabase(url: databaseURL)
+        try db.removeFolder(id: id)
+    }
+
+    /// Incremental removal of a clip.
+    public func removeClip(id: UUID) throws {
+        let db = try LibraryDatabase(url: databaseURL)
+        try db.removeClip(id: id)
+    }
+
+    public func restoreBackup() throws -> LibraryManifest {
+        // 1. Attempt restore from SQLite backup if available and intact
+        if FileManager.default.fileExists(atPath: databaseBackupURL.path) {
+            if let testDb = try? LibraryDatabase(url: databaseBackupURL), testDb.checkIntegrity() {
+                testDb.close()
+                if FileManager.default.fileExists(atPath: databaseURL.path) {
+                    try? FileManager.default.removeItem(at: databaseURL)
+                }
+                try FileManager.default.copyItem(at: databaseBackupURL, to: databaseURL)
+                let db = try LibraryDatabase(url: databaseURL)
+                let manifest = try db.loadManifest()
+                // Synchronize JSON
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys]
+                if let data = try? encoder.encode(manifest) {
+                    try? data.write(to: manifestURL, options: .atomic)
+                }
+                return manifest
+            }
+        }
+
+        // 2. Fall back to JSON backup
+        guard FileManager.default.fileExists(atPath: backupURL.path) else { throw LibraryError.noBackup }
+        let data = try Data(contentsOf: backupURL)
+        let manifest = try JSONDecoder().decode(LibraryManifest.self, from: data)
+        guard manifest.version == 1 else { throw LibraryError.unsupportedVersion }
+        try save(manifest)
+        return manifest
+    }
+
     public func cleanWorkingDirectories() {
         if FileManager.default.fileExists(atPath: workingDirectory.path) {
             try? FileManager.default.removeItem(at: workingDirectory)
         }
         try? FileManager.default.createDirectory(at: workingDirectory, withIntermediateDirectories: true)
     }
+
     public func pruneThumbnails(keeping activeNames: Set<String>) {
         guard let files = try? FileManager.default.contentsOfDirectory(at: thumbnailDirectory, includingPropertiesForKeys: nil) else { return }
         for file in files {
@@ -283,9 +421,21 @@ public struct LibraryStore: Sendable {
             }
         }
     }
+
     public enum LibraryError: LocalizedError {
         case unsupportedVersion
-        public var errorDescription: String? { "Versi indeks ini belum didukung. Gunakan versi Carfo yang membuat indeks tersebut." }
+        case noBackup
+        case corrupted
+        public var errorDescription: String? {
+            switch self {
+            case .unsupportedVersion:
+                return "Versi indeks ini belum didukung. Gunakan versi Carfo yang membuat indeks tersebut."
+            case .noBackup:
+                return "Tidak ada berkas backup indeks yang tersedia."
+            case .corrupted:
+                return "Berkas indeks rusak atau gagal dalam pemeriksaan integritas."
+            }
+        }
     }
 }
 

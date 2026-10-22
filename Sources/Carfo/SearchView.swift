@@ -45,8 +45,8 @@ struct SearchView: View {
                 VStack(spacing: 0) {
                     toolbar
                     Divider().opacity(0.55)
-                    if model.isSearching { loadingView.frame(height: 354) }
-                    else if !model.results.isEmpty { resultsView.frame(height: 354) }
+                    if !model.results.isEmpty { resultsView.frame(height: 354) }
+                    else if model.isSearching { loadingView.frame(height: 354) }
                     else { emptyView.frame(height: 354) }
                     Divider().opacity(0.55)
                     footer
@@ -135,7 +135,7 @@ struct SearchView: View {
         case .video:
             return "Coba kata kunci yang lebih umum atau periksa cakupan folder footage."
         case .visual:
-            return "Coba deskripsi objek atau gambar visual lain, atau pastikan folder berisi file gambar (.png, .jpg, dll)."
+            return "Coba deskripsi objek atau gambar visual lain, atau pastikan folder berisi file gambar (.png, .jpg, .svg, dll)."
         case .dialogue:
             return "Kata atau kalimat yang diucapkan belum ditemukan. Pastikan video memiliki trek suara percakapan."
         case .sound:
@@ -226,7 +226,7 @@ struct SearchView: View {
                     actionTitle: nil
                 )
             } else if model.mode == .visual && !model.library.clips.contains(where: \.isImage) {
-                StateMessage(symbol: "photo.badge.plus", title: "Belum ada gambar", detail: "Folder yang dipilih belum memiliki file gambar (.png, .jpg, .webp, dll).", actionTitle: "Pilih folder") { model.pickFolder() }
+                StateMessage(symbol: "photo.badge.plus", title: "Belum ada gambar", detail: "Folder yang dipilih belum memiliki file gambar (.png, .jpg, .svg, dll).", actionTitle: "Pilih folder") { model.pickFolder() }
             } else if model.mode == .sound && !model.library.clips.contains(where: { $0.isAudio || ($0.isVideo && $0.hasAudio) }) {
                 StateMessage(symbol: "waveform.badge.plus", title: "Belum ada audio", detail: "Folder yang dipilih belum memiliki file audio (.mp3, .wav, dll) atau video bersuara.", actionTitle: "Pilih folder") { model.pickFolder() }
             } else {
@@ -249,15 +249,32 @@ struct SearchView: View {
                     HStack {
                         Text("Kecocokan dialog").font(CarfoDesign.font(12, weight: .semibold)).foregroundStyle(Color.primary)
                         Spacer()
-                        Text(model.results.first?.isSampleData == true ? "Data contoh" : "\(model.results.count) dialog")
+                        if model.isSearching {
+                            HStack(spacing: 4) {
+                                ProgressView().controlSize(.mini)
+                                Text("Mencari semantik...")
+                            }
                             .font(CarfoDesign.font(11)).foregroundStyle(CarfoDesign.secondary)
+                        } else {
+                            Text(model.results.first?.isSampleData == true ? "Data contoh" : "\(model.results.count) dialog")
+                                .font(CarfoDesign.font(11)).foregroundStyle(CarfoDesign.secondary)
+                        }
                     }.padding(.horizontal, 8)
                 } else {
                     HStack {
                         Text("Carfo")
                         Spacer()
-                        Text(model.semanticSearch ? "\(model.results.count) hasil terdekat" : "Nama file")
-                    }.font(CarfoDesign.font(10)).foregroundStyle(CarfoDesign.secondary).padding(.horizontal, 8)
+                        if model.isSearching {
+                            HStack(spacing: 4) {
+                                ProgressView().controlSize(.mini)
+                                Text(model.semanticSearch ? "\(model.results.count) hasil" : "Nama file · mencari semantik...")
+                            }
+                            .font(CarfoDesign.font(10)).foregroundStyle(CarfoDesign.secondary)
+                        } else {
+                            Text(model.semanticSearch ? "\(model.results.count) hasil terdekat" : "Nama file")
+                                .font(CarfoDesign.font(10)).foregroundStyle(CarfoDesign.secondary)
+                        }
+                    }.padding(.horizontal, 8)
                 }
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -1052,13 +1069,17 @@ final class ThumbnailCache {
     }
 
     private func loadDownsampled(url: URL, maxPixelSize: CGFloat) -> NSImage? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return NSImage(contentsOf: url)
+        }
         let options: [CFString: Any] = [
             kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true
         ]
-        guard let cgThumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        guard let cgThumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return NSImage(contentsOf: url)
+        }
         return NSImage(cgImage: cgThumb, size: NSSize(width: cgThumb.width, height: cgThumb.height))
     }
 }

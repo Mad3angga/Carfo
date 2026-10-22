@@ -24,6 +24,9 @@ public actor LocalEngine {
     private var installation: LocalModelInstallation
     private let script: URL
     private let logDirectory: URL
+    private var nextRequestId: UInt64 = 1
+    private var isRequestInFlight = false
+
     public init(installation: LocalModelInstallation, script: URL, logDirectory: URL) {
         self.installation = installation; self.script = script; self.logDirectory = logDirectory
     }
@@ -32,13 +35,14 @@ public actor LocalEngine {
     }
     public func stop() {
         idleTask?.cancel(); idleTask = nil
+        isRequestInFlight = false
         if process?.isRunning == true { process?.terminate() }
         try? input?.close(); try? output?.close()
         process = nil; input = nil; output = nil; pending.removeAll()
     }
-    public func purge() {
+    public func purge() async {
         guard process?.isRunning == true else { return }
-        _ = try? request(["op": "purge"], timeout: 10)
+        _ = try? await request(["op": "purge"], timeout: 10)
     }
     private func resetIdleTimer(seconds: TimeInterval = 45) {
         idleTask?.cancel()
@@ -48,34 +52,56 @@ public actor LocalEngine {
             await self?.stop()
         }
     }
-    public func verify() throws -> String {
-        let response = try request(["op": "verify"])
+    public func verify(timeout: TimeInterval = 180) async throws -> String {
+        let response = try await request(["op": "verify"], timeout: timeout)
         return response["backend"] as? String ?? "MLX"
     }
-    public func embed(query: String, mode: SearchMode) throws -> [Float] {
-        try vector(request(["op": "text", "text": mode.queryText(query)]))
+    public func embed(query: String, mode: SearchMode) async throws -> [Float] {
+        try vector(await request(["op": "text", "text": mode.queryText(query)]))
     }
-    public func embed(frames: [URL]) throws -> [Float] {
-        try vector(request(["op": "images", "paths": frames.map(\.path)]))
+    public func embed(frames: [URL]) async throws -> [Float] {
+        try vector(await request(["op": "images", "paths": frames.map(\.path)]))
     }
-    public func embed(audio: URL) throws -> [Float] {
-        try vector(request(["op": "audio", "path": audio.path]))
+    public func embed(audio: URL) async throws -> [Float] {
+        try vector(await request(["op": "audio", "path": audio.path]))
     }
     /// Embeds transcript lines as retrieval documents, in batches to keep pipe responses small.
-    public func embed(documents: [String]) throws -> [[Float]] {
+    public func embed(documents: [String]) async throws -> [[Float]] {
         var output: [[Float]] = []
         for start in stride(from: 0, to: documents.count, by: 16) {
+            try Task.checkCancellation()
             let batch = Array(documents[start..<min(documents.count, start + 16)]).map { "title: none | text: \($0)" }
-            let response = try request(["op": "texts", "texts": batch])
+            let response = try await request(["op": "texts", "texts": batch])
             guard let rows = response["embeddings"] as? [[NSNumber]], rows.count == batch.count else { throw EngineError.invalidResponse }
             output += try rows.map { try vector(["embedding": $0]) }
         }
         return output
     }
     /// Transcribes a 16 kHz mono WAV with Whisper and returns sentence-level cues in seconds.
-    public func transcribe(audio: URL, duration: Double) throws -> [TranscriptCue] {
+    /// Long audio is chunked into units (default 60s) to allow prompt cancellation.
+    public func transcribe(audio: URL, duration: Double, chunkSize: Double = 60) async throws -> [TranscriptCue] {
         guard installation.whisperDirectory != nil else { throw EngineError.transcriberUnavailable }
-        let response = try request(["op": "transcribe", "path": audio.path], timeout: max(300, duration * 3))
+        if duration <= chunkSize {
+            let response = try await request(["op": "transcribe", "path": audio.path], timeout: max(300, duration * 3))
+            return try parseCues(response)
+        }
+        var allCues: [TranscriptCue] = []
+        var offset: Double = 0
+        while offset < duration {
+            try Task.checkCancellation()
+            let chunkDuration = min(chunkSize, duration - offset)
+            let response = try await request([
+                "op": "transcribe",
+                "path": audio.path,
+                "offset": offset,
+                "duration": chunkDuration
+            ], timeout: max(60, chunkDuration * 3))
+            allCues += try parseCues(response)
+            offset += chunkSize
+        }
+        return allCues
+    }
+    private func parseCues(_ response: [String: Any]) throws -> [TranscriptCue] {
         guard let rows = response["cues"] as? [[String: Any]] else { throw EngineError.invalidResponse }
         return rows.compactMap { row in
             guard let start = (row["start"] as? NSNumber)?.doubleValue, let end = (row["end"] as? NSNumber)?.doubleValue,
@@ -90,6 +116,7 @@ public actor LocalEngine {
     }
     private func start() throws {
         if process?.isRunning == true { return }
+        stop()
         guard let python = installation.pythonExecutable, let model = installation.modelDirectory else { throw EngineError.unavailable }
         let worker = Process()
         worker.executableURL = python
@@ -108,41 +135,81 @@ public actor LocalEngine {
         process = worker; input = incoming.fileHandleForWriting; output = outgoing.fileHandleForReading
         pending.removeAll()
     }
-    private func request(_ payload: [String: Any], timeout: TimeInterval = 180) throws -> [String: Any] {
+    public func request(_ payload: [String: Any], timeout: TimeInterval = 180) async throws -> [String: Any] {
         try Task.checkCancellation()
         idleTask?.cancel(); idleTask = nil
+
+        while isRequestInFlight {
+            try Task.checkCancellation()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        isRequestInFlight = true
+        defer { isRequestInFlight = false }
+
+        try Task.checkCancellation()
         try start()
         guard let input, let output else { throw EngineError.stopped }
-        var bytes = try JSONSerialization.data(withJSONObject: payload)
+
+        let reqId = nextRequestId
+        nextRequestId += 1
+        var payloadWithId = payload
+        payloadWithId["id"] = reqId
+
+        var bytes = try JSONSerialization.data(withJSONObject: payloadWithId)
         bytes.append(10)
         try input.write(contentsOf: bytes)
+
         let deadline = Date().addingTimeInterval(timeout)
-        var wasCancelled = false
         while Date() < deadline {
-            if Task.isCancelled { wasCancelled = true }
+            if Task.isCancelled {
+                resetIdleTimer()
+                throw CancellationError()
+            }
+
             if let newline = pending.firstIndex(of: 10) {
                 let line = pending.prefix(upTo: newline)
                 pending.removeSubrange(...newline)
-                if wasCancelled {
-                    resetIdleTimer()
-                    throw CancellationError()
+                guard let object = try JSONSerialization.jsonObject(with: line) as? [String: Any] else {
+                    throw EngineError.invalidResponse
                 }
-                guard let object = try JSONSerialization.jsonObject(with: line) as? [String: Any] else { throw EngineError.invalidResponse }
-                if object["ok"] as? Bool == false { throw EngineError.inference(object["error"] as? String ?? "Model tidak dapat memproses media ini.") }
+                if let resId = (object["id"] as? NSNumber)?.uint64Value ?? (object["id"] as? UInt64) {
+                    if resId != reqId {
+                        // Stale response from a cancelled or previous request; discard and continue
+                        continue
+                    }
+                }
+                if object["ok"] as? Bool == false {
+                    throw EngineError.inference(object["error"] as? String ?? "Model tidak dapat memproses media ini.")
+                }
                 resetIdleTimer()
                 return object
             }
-            var descriptor = pollfd(fd: output.fileDescriptor, events: Int16(POLLIN), revents: 0)
-            let ready = Darwin.poll(&descriptor, 1, 200)
+
+            guard let currentOutput = self.output, let currentProcess = self.process, currentProcess.isRunning else {
+                stop()
+                throw EngineError.stopped
+            }
+
+            var descriptor = pollfd(fd: currentOutput.fileDescriptor, events: Int16(POLLIN), revents: 0)
+            let ready = Darwin.poll(&descriptor, 1, 0)
             if ready > 0 {
                 var chunk = [UInt8](repeating: 0, count: 65536)
-                let count = chunk.withUnsafeMutableBytes { Darwin.read(output.fileDescriptor, $0.baseAddress!, $0.count) }
+                let count = chunk.withUnsafeMutableBytes { Darwin.read(currentOutput.fileDescriptor, $0.baseAddress!, $0.count) }
                 if count < 0 && errno == EINTR { continue }
                 guard count > 0 else { stop(); throw EngineError.stopped }
                 pending.append(contentsOf: chunk.prefix(count))
                 if pending.count > 2_000_000 { stop(); throw EngineError.invalidResponse }
-            } else if process?.isRunning != true { stop(); throw EngineError.stopped }
+            } else if ready < 0 && errno != EINTR {
+                stop(); throw EngineError.stopped
+            } else {
+                if currentProcess.isRunning != true {
+                    stop(); throw EngineError.stopped
+                }
+                // Yield the actor cooperatively
+                try await Task.sleep(for: .milliseconds(15))
+            }
         }
-        stop(); throw EngineError.timedOut
+        stop()
+        throw EngineError.timedOut
     }
 }

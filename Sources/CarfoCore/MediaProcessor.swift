@@ -3,6 +3,9 @@ import Foundation
 import ImageIO
 import CoreGraphics
 import UniformTypeIdentifiers
+#if canImport(AppKit)
+import AppKit
+#endif
 
 public struct MediaMetadata: Sendable {
     public var duration: Double
@@ -108,17 +111,25 @@ public struct ScanReport: Sendable {
 public enum LibraryScanner {
     public static let extensions: Set<String> = MediaType.videoExtensions.union(MediaType.imageExtensions).union(MediaType.audioExtensions)
 
-    /// Extract image dimensions from a file URL using CGImageSource.
+    /// Extract image dimensions from a file URL using CGImageSource or AppKit for SVG.
     public static func imageMetadata(url: URL) throws -> (width: Int, height: Int) {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
-            throw MediaError.unreadable(url.lastPathComponent)
+        if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+           let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
+            let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+            let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+            if width > 0 && height > 0 {
+                return (width, height)
+            }
         }
-        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
-            throw MediaError.unreadable(url.lastPathComponent)
+        #if canImport(AppKit)
+        if let image = NSImage(contentsOf: url) {
+            let size = image.size
+            if size.width > 0 && size.height > 0 {
+                return (Int(size.width), Int(size.height))
+            }
         }
-        let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
-        let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
-        return (width, height)
+        #endif
+        throw MediaError.unreadable(url.lastPathComponent)
     }
 
     /// Extract duration from an audio-only file.
@@ -129,9 +140,63 @@ public enum LibraryScanner {
         return (duration, true)
     }
 
+    /// Generate a raster JPEG thumbnail for an SVG vector image using AppKit.
+    public static func svgThumbnail(url: URL, destination: URL, maxDimension: CGFloat = 480) throws {
+        #if canImport(AppKit)
+        guard let image = NSImage(contentsOf: url) else {
+            throw MediaError.unreadable(url.lastPathComponent)
+        }
+        let origSize = image.size
+        guard origSize.width > 0, origSize.height > 0 else {
+            throw MediaError.unreadable(url.lastPathComponent)
+        }
+        let scale = min(maxDimension / origSize.width, maxDimension / origSize.height, 1.0)
+        let targetWidth = max(1, Int(origSize.width * scale))
+        let targetHeight = max(1, Int(origSize.height * scale))
+
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: targetWidth,
+            pixelsHigh: targetHeight,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            throw MediaError.exportFailed
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        let ctx = NSGraphicsContext(bitmapImageRep: rep)
+        NSGraphicsContext.current = ctx
+        ctx?.cgContext.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx?.cgContext.fill(CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
+        image.draw(in: NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight), from: .zero, operation: .sourceOver, fraction: 1.0)
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let jpegData = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else {
+            throw MediaError.exportFailed
+        }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try? FileManager.default.removeItem(at: destination)
+        }
+        try jpegData.write(to: destination)
+        #else
+        throw MediaError.unreadable(url.lastPathComponent)
+        #endif
+    }
+
     /// Generate a thumbnail for an image by copying and resizing it.
     public static func imageThumbnail(url: URL, destination: URL) throws {
+        if url.pathExtension.lowercased() == "svg" {
+            try svgThumbnail(url: url, destination: destination)
+            return
+        }
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            if (try? svgThumbnail(url: url, destination: destination)) != nil { return }
             throw MediaError.unreadable(url.lastPathComponent)
         }
         let options: [CFString: Any] = [
@@ -140,6 +205,7 @@ public enum LibraryScanner {
             kCGImageSourceCreateThumbnailWithTransform: true
         ]
         guard let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            if (try? svgThumbnail(url: url, destination: destination)) != nil { return }
             // Fall back to copying the original file as thumbnail
             if FileManager.default.fileExists(atPath: destination.path) {
                 try? FileManager.default.removeItem(at: destination)
