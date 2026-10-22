@@ -22,7 +22,8 @@ public enum DatabaseError: LocalizedError {
 public final class LibraryDatabase: @unchecked Sendable {
     public let url: URL
     private var db: OpaquePointer?
-    private let lock = NSLock()
+    private let lock = NSRecursiveLock()
+    private var transactionDepth = 0
 
     public init(url: URL) throws {
         self.url = url
@@ -167,20 +168,43 @@ public final class LibraryDatabase: @unchecked Sendable {
         defer { lock.unlock() }
         guard let db else { throw DatabaseError.connectionFailed("Database tidak terbuka") }
 
-        if sqlite3_exec(db, "BEGIN IMMEDIATE TRANSACTION;", nil, nil, nil) != SQLITE_OK {
-            let msg = String(cString: sqlite3_errmsg(db))
-            throw DatabaseError.executionFailed("Gagal memulai transaksi: \(msg)")
+        let isOuter = (transactionDepth == 0)
+        let savepointName = "sp_\(transactionDepth)"
+        transactionDepth += 1
+
+        if isOuter {
+            if sqlite3_exec(db, "BEGIN IMMEDIATE TRANSACTION;", nil, nil, nil) != SQLITE_OK {
+                transactionDepth -= 1
+                let msg = String(cString: sqlite3_errmsg(db))
+                throw DatabaseError.executionFailed("Gagal memulai transaksi: \(msg)")
+            }
+        } else {
+            if sqlite3_exec(db, "SAVEPOINT \(savepointName);", nil, nil, nil) != SQLITE_OK {
+                transactionDepth -= 1
+                let msg = String(cString: sqlite3_errmsg(db))
+                throw DatabaseError.executionFailed("Gagal membuat savepoint: \(msg)")
+            }
         }
 
         do {
             let result = try block()
-            if sqlite3_exec(db, "COMMIT;", nil, nil, nil) != SQLITE_OK {
-                let msg = String(cString: sqlite3_errmsg(db))
-                throw DatabaseError.executionFailed("Gagal commit transaksi: \(msg)")
+            transactionDepth -= 1
+            if isOuter {
+                if sqlite3_exec(db, "COMMIT;", nil, nil, nil) != SQLITE_OK {
+                    let msg = String(cString: sqlite3_errmsg(db))
+                    throw DatabaseError.executionFailed("Gagal commit transaksi: \(msg)")
+                }
+            } else {
+                _ = sqlite3_exec(db, "RELEASE SAVEPOINT \(savepointName);", nil, nil, nil)
             }
             return result
         } catch {
-            _ = sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+            transactionDepth -= 1
+            if isOuter {
+                _ = sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+            } else {
+                _ = sqlite3_exec(db, "ROLLBACK TO SAVEPOINT \(savepointName);", nil, nil, nil)
+            }
             throw error
         }
     }
@@ -309,7 +333,7 @@ public final class LibraryDatabase: @unchecked Sendable {
                     sqlite3_bind_null(stmt, 3)
                 }
                 if let scan = folder.scannedAt {
-                    sqlite3_bind_double(stmt, 4, scan.timeIntervalSince1970)
+                    sqlite3_bind_double(stmt, 4, scan.timeIntervalSinceReferenceDate)
                 } else {
                     sqlite3_bind_null(stmt, 4)
                 }
@@ -324,7 +348,6 @@ public final class LibraryDatabase: @unchecked Sendable {
     public func removeFolder(id: UUID) throws {
         try transaction {
             guard let db else { throw DatabaseError.connectionFailed("Database tidak terbuka") }
-            // Find all clips belonging to folder
             var stmt: OpaquePointer?
             var clipIDs: [UUID] = []
             if sqlite3_prepare_v2(db, "SELECT id FROM clips WHERE folder_id = ?;", -1, &stmt, nil) == SQLITE_OK {
@@ -372,7 +395,6 @@ public final class LibraryDatabase: @unchecked Sendable {
 
             // 2. Folders
             let currentFolderIDs = Set(manifest.folders.map(\.id.uuidString))
-            // Remove obsolete folders
             var existingFolderIDs: [String] = []
             var folderListStmt: OpaquePointer?
             if sqlite3_prepare_v2(db, "SELECT id FROM folders;", -1, &folderListStmt, nil) == SQLITE_OK {
@@ -397,7 +419,7 @@ public final class LibraryDatabase: @unchecked Sendable {
                         }
                     } else { sqlite3_bind_null(fStmt, 3) }
                     if let sc = folder.scannedAt {
-                        sqlite3_bind_double(fStmt, 4, sc.timeIntervalSince1970)
+                        sqlite3_bind_double(fStmt, 4, sc.timeIntervalSinceReferenceDate)
                     } else { sqlite3_bind_null(fStmt, 4) }
                     sqlite3_step(fStmt)
                 }
@@ -467,7 +489,7 @@ public final class LibraryDatabase: @unchecked Sendable {
                 }
                 var scannedAt: Date?
                 if sqlite3_column_type(folderStmt, 3) != SQLITE_NULL {
-                    scannedAt = Date(timeIntervalSince1970: sqlite3_column_double(folderStmt, 3))
+                    scannedAt = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(folderStmt, 3))
                 }
                 manifest.folders.append(FootageFolder(id: u, path: path, bookmark: bookmark, scannedAt: scannedAt))
             }
@@ -581,7 +603,7 @@ public final class LibraryDatabase: @unchecked Sendable {
                     relPath = String(cString: rPtr)
                 }
                 let fileSize = sqlite3_column_int64(clipStmt, 4)
-                let modifiedAt = Date(timeIntervalSince1970: sqlite3_column_double(clipStmt, 5))
+                let modifiedAt = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(clipStmt, 5))
                 let duration = sqlite3_column_double(clipStmt, 6)
                 let width = Int(sqlite3_column_int64(clipStmt, 7))
                 let height = Int(sqlite3_column_int64(clipStmt, 8))
@@ -595,7 +617,7 @@ public final class LibraryDatabase: @unchecked Sendable {
 
                 var indexedAt: Date?
                 if sqlite3_column_type(clipStmt, 12) != SQLITE_NULL {
-                    indexedAt = Date(timeIntervalSince1970: sqlite3_column_double(clipStmt, 12))
+                    indexedAt = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(clipStmt, 12))
                 }
 
                 var indexError: String?
@@ -605,7 +627,7 @@ public final class LibraryDatabase: @unchecked Sendable {
 
                 var transcribedAt: Date?
                 if sqlite3_column_type(clipStmt, 14) != SQLITE_NULL {
-                    transcribedAt = Date(timeIntervalSince1970: sqlite3_column_double(clipStmt, 14))
+                    transcribedAt = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(clipStmt, 14))
                 }
 
                 var transcriptError: String?
@@ -654,7 +676,6 @@ public final class LibraryDatabase: @unchecked Sendable {
         defer { lock.unlock() }
         guard let db else { throw DatabaseError.connectionFailed("Database tidak terbuka") }
 
-        // Checkpoint WAL first to flush data to disk
         sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_FULL, nil, nil)
 
         var destDb: OpaquePointer?
@@ -699,7 +720,7 @@ public final class LibraryDatabase: @unchecked Sendable {
         sqlite3_bind_text(clipStmt, 3, clip.path, -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(clipStmt, 4, clip.relativePath, -1, SQLITE_TRANSIENT)
         sqlite3_bind_int64(clipStmt, 5, clip.fileSize)
-        sqlite3_bind_double(clipStmt, 6, clip.modifiedAt.timeIntervalSince1970)
+        sqlite3_bind_double(clipStmt, 6, clip.modifiedAt.timeIntervalSinceReferenceDate)
         sqlite3_bind_double(clipStmt, 7, clip.duration)
         sqlite3_bind_int64(clipStmt, 8, Int64(clip.width))
         sqlite3_bind_int64(clipStmt, 9, Int64(clip.height))
@@ -711,7 +732,7 @@ public final class LibraryDatabase: @unchecked Sendable {
         } else { sqlite3_bind_null(clipStmt, 12) }
 
         if let idx = clip.indexedAt {
-            sqlite3_bind_double(clipStmt, 13, idx.timeIntervalSince1970)
+            sqlite3_bind_double(clipStmt, 13, idx.timeIntervalSinceReferenceDate)
         } else { sqlite3_bind_null(clipStmt, 13) }
 
         if let err = clip.indexError {
@@ -719,7 +740,7 @@ public final class LibraryDatabase: @unchecked Sendable {
         } else { sqlite3_bind_null(clipStmt, 14) }
 
         if let trAt = clip.transcribedAt {
-            sqlite3_bind_double(clipStmt, 15, trAt.timeIntervalSince1970)
+            sqlite3_bind_double(clipStmt, 15, trAt.timeIntervalSinceReferenceDate)
         } else { sqlite3_bind_null(clipStmt, 15) }
 
         if let trErr = clip.transcriptError {

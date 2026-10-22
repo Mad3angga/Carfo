@@ -94,7 +94,7 @@ Prioritas:
 
   Rujukan: [LocalEngine.swift](Sources/CarfoCore/LocalEngine.swift), [worker.py](Sources/Carfo/Resources/Engine/worker.py), fungsi `request`, `stop`, dan loop protokol.
 
-- [ ] **CF-09: Ganti penyimpanan seluruh library dengan pembaruan incremental.**
+- [x] **CF-09: Ganti penyimpanan seluruh library dengan pembaruan incremental.**
 
   Masalah: setiap simpan melakukan encoding dan penulisan ulang seluruh JSON. Benchmark 1.000 video menghasilkan JSON 181,9 MiB dan waktu simpan sekitar 4,25 detik.
 
