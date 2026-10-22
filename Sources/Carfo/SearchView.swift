@@ -11,6 +11,7 @@ extension Notification.Name {
 
 struct SearchView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject private var thumbnails = ThumbnailCache.shared
     var resize: (Bool) -> Void
     @State private var searchFocused = true
     @Environment(\.colorScheme) private var scheme
@@ -71,6 +72,7 @@ struct SearchView: View {
         .preferredColorScheme(model.appearance.colorScheme)
         .animation(.spring(response: 0.35, dampingFraction: 0.78), value: expanded)
         .onChange(of: expanded) { _, value in resize(value) }
+        .onAppear { model.recordStartupStage("searchViewAppearedMS") }
         .onExitCommand {
             if !model.query.isEmpty {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
@@ -417,7 +419,7 @@ struct SearchView: View {
     }
     @ViewBuilder
     private func imagePreviewView(_ selected: SearchResult, thumbImage: NSImage?) -> some View {
-        let previewImage = ThumbnailCache.shared.image(for: selected.clip.url, targetSize: CGSize(width: 640, height: 480)) ?? thumbImage
+        let previewImage = ThumbnailCache.shared.image(for: selected.clip.url, targetSize: CGSize(width: 640, height: 480), version: selected.clip.modifiedAt.timeIntervalSinceReferenceDate) ?? thumbImage
         if let previewImage {
             Image(nsImage: previewImage)
                 .resizable()
@@ -659,6 +661,7 @@ private struct MoviePreview: NSViewRepresentable {
 
 private struct DialogResultRow: View {
     @ObservedObject var model: AppModel
+    @ObservedObject private var thumbnails = ThumbnailCache.shared
     let result: SearchResult
     private var selected: Bool { model.selectedID == result.id }
 
@@ -744,6 +747,7 @@ private struct DialogResultRow: View {
 
 private struct ResultRow: View {
     @ObservedObject var model: AppModel
+    @ObservedObject private var thumbnails = ThumbnailCache.shared
     let result: SearchResult
     private var selected: Bool { model.selectedID == result.id }
     private var mediaIcon: String {
@@ -930,8 +934,10 @@ private struct SearchTextField: NSViewRepresentable {
             object: nil,
             queue: .main
         ) { [weak field] _ in
-            field?.window?.makeFirstResponder(field)
-            field?.selectText(nil)
+            Task { @MainActor in
+                field?.window?.makeFirstResponder(field)
+                field?.selectText(nil)
+            }
         }
 
         DispatchQueue.main.async {
@@ -1041,34 +1047,50 @@ private struct SearchTextField: NSViewRepresentable {
 
 // MARK: - Thumbnail Cache & Image Helpers
 
-final class ThumbnailCache {
+@MainActor
+final class ThumbnailCache: ObservableObject {
     static let shared = ThumbnailCache()
-    private let cache = NSCache<NSURL, NSImage>()
+    private let cache = NSCache<NSString, NSImage>()
+    @Published private(set) var revision = 0
+    private var resolvedKeys: [String: String] = [:]
+    private var pending = Set<String>()
 
     init() {
         cache.countLimit = 300
         cache.totalCostLimit = 64 * 1024 * 1024 // 64 MB
     }
 
-    func image(for url: URL, targetSize: CGSize? = nil) -> NSImage? {
-        let key = url as NSURL
-        if let cached = cache.object(forKey: key) {
-            return cached
+    func image(for url: URL, targetSize: CGSize? = nil, version: Double = 0) -> NSImage? {
+        let size = targetSize ?? CGSize(width: 480, height: 480)
+        let request = "\(url.path)|\(size.width)x\(size.height)|\(version)"
+        let previousKey = resolvedKeys[request]
+        let previous = previousKey.flatMap { cache.object(forKey: $0 as NSString) }
+        let wasCached = previous != nil
+        if pending.insert(request).inserted {
+            Task { [weak self] in
+                let loaded = await Task.detached(priority: .utility) {
+                    let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+                    let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
+                    let key = request + "|\(modified)|\(attrs?[.size] as? NSNumber ?? 0)"
+                    return DecodedThumbnail(key: key, image: key == previousKey && wasCached ? nil : Self.loadDownsampled(url: url, maxPixelSize: max(size.width, size.height) * 2))
+                }.value
+                guard let self else { return }
+                self.pending.remove(request)
+                if let image = loaded.image {
+                    self.cache.setObject(image, forKey: loaded.key as NSString, cost: Int(image.size.width * image.size.height * 4))
+                    self.resolvedKeys[request] = loaded.key
+                    if self.resolvedKeys.count > 600 { self.resolvedKeys = [request: loaded.key] }
+                    self.revision &+= 1
+                } else if loaded.key != previousKey {
+                    self.resolvedKeys.removeValue(forKey: request)
+                    if wasCached { self.revision &+= 1 }
+                }
+            }
         }
-        let image: NSImage?
-        if let targetSize {
-            image = loadDownsampled(url: url, maxPixelSize: max(targetSize.width, targetSize.height) * 2)
-        } else {
-            image = NSImage(contentsOf: url)
-        }
-        if let image {
-            let cost = Int(image.size.width * image.size.height * 4)
-            cache.setObject(image, forKey: key, cost: cost)
-        }
-        return image
+        return previous
     }
 
-    private func loadDownsampled(url: URL, maxPixelSize: CGFloat) -> NSImage? {
+    nonisolated private static func loadDownsampled(url: URL, maxPixelSize: CGFloat) -> NSImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
             return NSImage(contentsOf: url)
         }
@@ -1084,13 +1106,19 @@ final class ThumbnailCache {
     }
 }
 
+private struct DecodedThumbnail: @unchecked Sendable {
+    let key: String
+    let image: NSImage?
+}
+
+@MainActor
 func clipThumbnailImage(for clip: FootageClip, thumbnailDirectory: URL, targetSize: CGSize = CGSize(width: 96, height: 64)) -> NSImage? {
     if let thumbnail = clip.thumbnail {
         let thumbURL = thumbnailDirectory.appendingPathComponent(thumbnail)
-        return ThumbnailCache.shared.image(for: thumbURL)
+        return ThumbnailCache.shared.image(for: thumbURL, targetSize: targetSize, version: clip.modifiedAt.timeIntervalSinceReferenceDate)
     }
     if clip.isImage {
-        return ThumbnailCache.shared.image(for: clip.url, targetSize: targetSize)
+        return ThumbnailCache.shared.image(for: clip.url, targetSize: targetSize, version: clip.modifiedAt.timeIntervalSinceReferenceDate)
     }
     return nil
 }
@@ -1105,9 +1133,9 @@ func makeDragItemProvider(for url: URL, thumbnail: NSImage? = nil) -> NSItemProv
         completion(url, false, nil)
         return nil
     }
-    if let thumbnail {
+    if let data = thumbnail?.tiffRepresentation {
         provider.previewImageHandler = { (completion, _, _) in
-            completion?(thumbnail, nil)
+            completion?(NSImage(data: data), nil)
         }
     }
     return provider

@@ -84,8 +84,9 @@ private final class ConcurrentResultCollector: @unchecked Sendable {
 
 public enum SearchEngine {
     /// Minimum cosine between a query and a transcript line for a meaning-only match.
-    /// Measured on EmbeddingGemma 2: related Indonesian pairs score about 0.82 to 0.91, unrelated 0.58 to 0.70.
+    /// Provisional threshold; real-media calibration is tracked in Validation/README.md.
     public static let dialogueSemanticFloor: Float = 0.78
+    public static let semanticFloor: Float = 0.2
 
     public static func search(clips: [FootageClip], query: String, mode: SearchMode = .video, folderID: UUID? = nil, embedding: [Float]? = nil, textEmbedding: [Float]? = nil, limit: Int = 40) -> [SearchResult] {
         guard limit > 0 else { return [] }
@@ -120,7 +121,7 @@ public enum SearchEngine {
                 for clip in candidates where !matchedClipIDs.contains(clip.id) {
                     let filename = normalized(clip.name + " " + clip.relativePath)
                     if tokens.allSatisfy({ filename.contains($0) }) {
-                        dialogueResults.append(SearchResult(clip: clip, score: 0))
+                        dialogueResults.append(SearchResult(clip: clip, score: 1.25))
                     } else if let audioQuery {
                         // Hybrid fallback: check untranscribed clips or clips with no dialogue matches using audio embedding
                         var bestSegment: VideoSegment?
@@ -160,9 +161,11 @@ public enum SearchEngine {
                 .prefix(limit).map { SearchResult(clip: $0) }
         }
 
-        let evaluateCandidate: (FootageClip) -> SearchResult? = { clip in
+        let evaluateCandidate: @Sendable (FootageClip) -> SearchResult? = { clip in
             let filename = normalized(clip.name + " " + clip.relativePath)
             let filenameMatch = tokens.allSatisfy { filename.contains($0) }
+            let exactName = normalized(clip.url.deletingPathExtension().lastPathComponent) == tokens.joined(separator: " ")
+            let filenameScore: Float = exactName ? 1.25 : filenameMatch ? 0.35 : 0
             var best: SearchResult?
             if let activeVector = effectiveVector {
                 for segment in clip.segments {
@@ -188,14 +191,14 @@ public enum SearchEngine {
                     case .sound, .dialogue:
                         score = segment.audioEmbedding.flatMap { VectorMath.similarity(normalizedQuery: activeVector, candidate: $0) }
                     }
-                    guard let score else { continue }
+                    guard let score, score >= (mode == .dialogue ? dialogueSemanticFloor : semanticFloor) else { continue }
                     if best == nil || score > best!.score {
                         best = SearchResult(clip: clip, segment: segment, score: score)
                     }
                 }
             }
-            if let best { return best }
-            else if filenameMatch { return SearchResult(clip: clip, score: 0) }
+            if var best { best.score += filenameScore; return best }
+            else if filenameMatch { return SearchResult(clip: clip, score: filenameScore) }
             return nil
         }
 
@@ -243,7 +246,9 @@ public enum SearchEngine {
                 let semantic = similarity.map { $0 >= dialogueSemanticFloor } ?? false
                 guard lexical > 0 || semantic else { continue }
                 let context = [index > 0 ? cues[index - 1] : nil, cue, index + 1 < cues.count ? cues[index + 1] : nil].compactMap { $0 }
-                results.append(SearchResult(clip: clip, segment: VideoSegment(start: cue.start, end: cue.end), score: lexical + (similarity ?? 0), matchedCue: cue, contextCues: context))
+                let filename = normalized(clip.name + " " + clip.relativePath)
+                let filenameBoost: Float = tokens.allSatisfy { filename.contains($0) } ? 0.35 : 0
+                results.append(SearchResult(clip: clip, segment: VideoSegment(start: cue.start, end: cue.end), score: lexical + max(0, similarity ?? 0) + filenameBoost, matchedCue: cue, contextCues: context))
             }
         }
         return results.sorted { a, b in

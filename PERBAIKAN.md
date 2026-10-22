@@ -2,7 +2,25 @@
 
 Tanggal audit: 22 Oktober 2026.
 
-Daftar ini berasal dari audit kode dan pengujian lokal pada kondisi working tree saat audit, termasuk perubahan yang belum di-commit. Semua pekerjaan di bawah masih terbuka. Checkbox hanya ditandai setelah implementasi dan verifikasinya selesai.
+Daftar ini berasal dari audit kode dan pengujian lokal pada kondisi working tree saat audit, termasuk perubahan yang belum di-commit. Status diperbarui setelah implementasi dan verifikasi lokal untuk kandidat Carfo 2.0. Checkbox kosong tetap menandakan kriteria yang belum seluruhnya terpenuhi.
+
+## Pembaruan implementasi 2.0
+
+| Item | Status dan bukti |
+| --- | --- |
+| CF-10 | Selesai: startup metadata dan indeks di background, status loading, proteksi simpan sebelum load selesai, catatan tahap startup. UI uji muncul sekitar 193 ms; metadata 288 ms dan indeks 292 ms untuk koleksi kosong. Model dingin 4,68 detik, hangat 199 ms, setelah idle paksa 4,03 detik. Idle produksi 300 detik; evaluasi energi jangka panjang tetap diperlukan. |
+| CF-11 | Selesai: statistik delta per clip, pemetaan ID selama batch scan/indexing, hitungan folder tersimpan. Uji penambahan/penghapusan, indexing parsial, dan perubahan status lulus. Delta statistik pada 1.000 video sekitar 0,00125 ms. |
+| CF-12 | Selesai: generator per file, API batch asinkron, validasi actual timestamp dalam 100 ms, pembatalan dan pembersihan request. Enam fixture H.264/HEVC/ProRes pada 360p/1080p berhasil. Median batch 31–67 ms versus generator per frame 68–216 ms; RSS proses benchmark sekitar 29,2 MiB. |
+| CF-13 | Selesai: WAV streaming, batas durasi sebelum ekstraksi, potongan 60 detik dengan overlap dua detik, offset dan asal transkrip tersimpan. Uji kegagalan potongan kedua dilanjutkan dari 60 detik tanpa mengulang potongan pertama. Audio sintetis 20 menit menghasilkan WAV 38,4 MB dengan RSS puncak proses ekstraksi sekitar 27,2 MiB. Kualitas batas ucapan nyata masih memerlukan koleksi berlabel. |
+| CF-14 | Selesai: asal transkrip/fingerprint sidecar persisten, perubahan subtitle tanpa perubahan video terdeteksi, cue tersedia hanya di-embed termasuk tanpa Whisper. Uji SRT, VTT settings, identifier, teks angka, timestamp invalid, dan subtitle invalid lulus. |
+| CF-15 | Sebagian: bobot nama file, prioritas nama persis, dan penolakan skor negatif/rendah diterapkan. **Tetap terbuka atas keputusan pengguna:** belum ada koleksi media berlabel untuk kalibrasi dan pengukuran retrieval representatif. |
+| CF-16 | Selesai: pemuatan/decoding thumbnail di background; key memuat versi file, ukuran, dan modification time thumbnail. Uji async, ukuran kecil/besar, serta perubahan isi pada URL sama lulus. |
+| CF-17 | Selesai untuk build lokal: path input eksplisit, Python/dependency lock 83 distribusi, pemeriksaan komponen wajib, hash model dan kontrak preprocessing, Python isolated mode. Bundle dengan runtime terpisah lolos smoke test offline seluruh mode memakai cache kosong. Sumber CPython standalone tetap input eksternal terdokumentasi di BUILDING.md. |
+| CF-18 | Alur signing/notarization/stapling dan verifikasi artefak tersedia. **Masih terbuka:** nol identitas signing valid pada mesin ini; Developer ID, notarization produksi, dan instalasi Mac bersih belum bisa dibuktikan. Build lokal memakai signature ad hoc. |
+| CF-19 | Selesai secara lokal: dependency injection direktori/defaults/instalasi/worker, regresi CF-01–CF-08 dan workflow AppModel, fixture tanpa path pribadi, CI strict concurrency dengan warnings-as-errors dan actor data race checks. Eksekusi CI remote belum dilakukan. |
+| CF-20 | Sebagian: baseline indeks, inferensi dingin/hangat/setelah idle, pembatalan, codec, audio streaming, dan tahap startup disimpan. **Masih terbuka:** throughput indexing penuh, profil main thread Instruments, RAM worker selama indexing panjang, kualitas retrieval representatif, serta batas rilis untuk metrik tersebut. |
+
+Rincian: [CHANGELOG.md](CHANGELOG.md), [BUILDING.md](BUILDING.md), [Validation/README.md](Validation/README.md). Angka adalah pengukuran lokal, bukan jaminan performa perangkat lain. Minimum bundle dikoreksi menjadi macOS 26.2 berdasarkan deployment target biner MLX bawaan.
 
 Prioritas:
 
@@ -106,7 +124,7 @@ Prioritas:
 
 ## P2: Efisiensi, kualitas hasil, dan distribusi
 
-- [ ] **CF-10: Muat indeks secara bertahap dan evaluasi kebijakan pelepasan model.**
+- [x] **CF-10: Muat indeks secara bertahap dan evaluasi kebijakan pelepasan model.**
 
   Masalah: startup membaca indeks pada main actor. Worker dilepas setelah idle 45 detik, sedangkan waktu muat model yang terukur sekitar 10,48 detik.
 
@@ -116,7 +134,7 @@ Prioritas:
 
   Rujukan: [AppModel.swift](Sources/Carfo/AppModel.swift), [LocalEngine.swift](Sources/CarfoCore/LocalEngine.swift), inisialisasi library dan `resetIdleTimer`.
 
-- [ ] **CF-11: Kurangi penghitungan ulang seluruh koleksi pada setiap pembaruan.**
+- [x] **CF-11: Kurangi penghitungan ulang seluruh koleksi pada setiap pembaruan.**
 
   Masalah: perubahan satu embedding menghitung ulang seluruh `LibraryStats`; batch scan membangun ulang dictionary posisi; tampilan folder memfilter seluruh koleksi untuk menghitung jumlah file.
 
@@ -126,7 +144,7 @@ Prioritas:
 
   Rujukan: [AppModel.swift](Sources/Carfo/AppModel.swift), [SettingsView.swift](Sources/Carfo/SettingsView.swift), observer `library`, `mergeScannedClips`, dan penghitungan file per folder.
 
-- [ ] **CF-12: Gunakan kembali decoder dan ambil frame secara asinkron berkelompok.**
+- [x] **CF-12: Gunakan kembali decoder dan ambil frame secara asinkron berkelompok.**
 
   Masalah: setiap frame membuat asset dan image generator baru serta memakai API sinkron yang deprecated pada macOS 15.
 
@@ -136,7 +154,7 @@ Prioritas:
 
   Rujukan: [MediaProcessor.swift](Sources/CarfoCore/MediaProcessor.swift), fungsi `frame` dan `frames`.
 
-- [ ] **CF-13: Tulis audio secara streaming dan transkripsikan per potongan.**
+- [x] **CF-13: Tulis audio secara streaming dan transkripsikan per potongan.**
 
   Masalah: Swift menampung seluruh PCM dan membentuk buffer WAV tambahan. Worker baru memeriksa batas empat jam setelah WAV disiapkan.
 
@@ -146,7 +164,7 @@ Prioritas:
 
   Rujukan: [MediaProcessor.swift](Sources/CarfoCore/MediaProcessor.swift), [AppModel.swift](Sources/Carfo/AppModel.swift), [worker.py](Sources/Carfo/Resources/Engine/worker.py), ekstraksi `full_audio.wav` dan `Transcriber.transcribe`.
 
-- [ ] **CF-14: Pertahankan subtitle yang tersedia dan perbaiki parser VTT.**
+- [x] **CF-14: Pertahankan subtitle yang tersedia dan perbaiki parser VTT.**
 
   Masalah: indexing dapat mengganti subtitle dengan hasil Whisper, perubahan subtitle tidak terdeteksi jika video tetap sama, dan parser menolak contoh VTT dengan pengaturan cue setelah timestamp.
 
@@ -166,7 +184,7 @@ Prioritas:
 
   Rujukan: [Search.swift](Sources/CarfoCore/Search.swift), fungsi `search` dan `dialogueMatches`.
 
-- [ ] **CF-16: Perbaiki invalidasi dan pemuatan cache thumbnail.**
+- [x] **CF-16: Perbaiki invalidasi dan pemuatan cache thumbnail.**
 
   Masalah: cache hanya memakai URL sehingga dapat mempertahankan gambar lama setelah file berubah atau memakai ukuran yang tidak sesuai. Pembacaan dan decoding saat cache miss masih sinkron dari view.
 
@@ -176,7 +194,7 @@ Prioritas:
 
   Rujukan: [SearchView.swift](Sources/Carfo/SearchView.swift), `ThumbnailCache`, `clipThumbnailImage`, dan `imagePreviewView`.
 
-- [ ] **CF-17: Buat packaging runtime yang dapat direproduksi.**
+- [x] **CF-17: Buat packaging runtime yang dapat direproduksi.**
 
   Masalah: skrip memakai path model pribadi, menyalin runtime dari `scratch/test-python`, dan dapat melewati komponen wajib yang tidak ditemukan. Runtime saat audit sekitar 1,5 GB dengan 256 distribusi paket.
 
@@ -196,7 +214,7 @@ Prioritas:
 
   Rujukan: [build-app.sh](scripts/build-app.sh), [build-dmg.sh](scripts/build-dmg.sh), [Info.plist](Support/Info.plist).
 
-- [ ] **CF-19: Tambahkan pengujian workflow aplikasi dan pemeriksaan concurrency di CI.**
+- [x] **CF-19: Tambahkan pengujian workflow aplikasi dan pemeriksaan concurrency di CI.**
 
   Masalah: 26 pengujian yang ada lulus, tetapi belum menangkap beberapa kegagalan pada siklus `AppModel`, pembatalan, dan jalur pencarian paralel.
 

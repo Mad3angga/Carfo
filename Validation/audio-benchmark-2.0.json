@@ -1,0 +1,8 @@
+{
+  "audioSeconds" : 1200,
+  "date" : "2026-10-22T07:06:15Z",
+  "extractionMS" : 118.63437500000001,
+  "outputBytes" : 38400044,
+  "peakRSSBytes" : 28540928,
+  "scope" : "streaming PCM16 extraction in a fresh process; no model or transcription"
+}

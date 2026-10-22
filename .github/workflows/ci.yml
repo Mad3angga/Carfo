@@ -1,0 +1,21 @@
+name: Verify Carfo
+on: [push, pull_request]
+jobs:
+  swift:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate media fixtures
+        run: |
+          brew install ffmpeg
+          mkdir -p '.runtime/Fixtures/Videos'
+          ffmpeg -nostdin -y -hide_banner -loglevel error -f lavfi -i 'color=c=red:s=640x360:r=24:d=2' -f lavfi -i 'sine=frequency=440:sample_rate=16000:duration=2' -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest '.runtime/Fixtures/Videos/Test red.mp4'
+      - name: Tests and strict concurrency
+        run: swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors -Xswiftc -enable-actor-data-race-checks
+      - name: Release build
+        run: swift build -c release --product Carfo
+      - name: Validate build scripts
+        run: |
+          zsh -n scripts/build-app.sh
+          zsh -n scripts/build-dmg.sh
+          python3 -m py_compile scripts/runtime-manifest.py scripts/prepare-runtime.py scripts/bundle-tools.py

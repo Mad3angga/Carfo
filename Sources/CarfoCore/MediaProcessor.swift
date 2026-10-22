@@ -3,6 +3,7 @@ import Foundation
 import ImageIO
 import CoreGraphics
 import UniformTypeIdentifiers
+import CryptoKit
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -40,27 +41,16 @@ public enum MediaProcessor {
         return MediaMetadata(duration: duration, width: Int(abs(bounds.width)), height: Int(abs(bounds.height)), frameRate: Double(fps), hasAudio: !audio.isEmpty)
     }
     public static func frame(url: URL, at seconds: Double, destination: URL) async throws {
-        try Task.checkCancellation()
-        try autoreleasepool {
-            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: 640, height: 480)
-            let image = try generator.copyCGImage(at: CMTime(seconds: max(0, seconds), preferredTimescale: 600), actualTime: nil)
-            guard let output = CGImageDestinationCreateWithURL(destination as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { throw MediaError.exportFailed }
-            CGImageDestinationAddImage(output, image, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
-            guard CGImageDestinationFinalize(output) else { throw MediaError.exportFailed }
-        }
+        let decoder = FrameDecoder(url: url)
+        try await decoder.write(at: max(0, seconds), destination: destination)
     }
-    public static func frames(url: URL, segment: VideoSegment, directory: URL) async throws -> [URL] {
-        var result: [URL] = []
-        for (index, time) in SegmentPlanner.sampleTimes(in: segment).enumerated() {
-            let destination = directory.appendingPathComponent("frame-\(index).jpg")
-            try await frame(url: url, at: time, destination: destination)
-            result.append(destination)
-        }
-        return result
+    public static func frames(url: URL, segment: VideoSegment, directory: URL, decoder: FrameDecoder? = nil) async throws -> [URL] {
+        try await (decoder ?? FrameDecoder(url: url)).write(times: SegmentPlanner.sampleTimes(in: segment), directory: directory)
     }
     public static func audio(url: URL, segment: VideoSegment, destination: URL) async throws {
+        try Task.checkCancellation()
+        guard segment.start.isFinite, segment.end.isFinite, segment.start >= 0,
+              segment.end > segment.start, segment.end - segment.start <= 4 * 3600 else { throw MediaError.exportFailed }
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .audio).first else { throw MediaError.noAudio }
         let reader = try AVAssetReader(asset: asset)
@@ -78,28 +68,89 @@ public enum MediaProcessor {
         guard reader.canAdd(output) else { throw MediaError.exportFailed }
         reader.add(output)
         guard reader.startReading() else { throw reader.error ?? MediaError.exportFailed }
-        var pcm = Data()
+        guard FileManager.default.createFile(atPath: destination.path, contents: Data(repeating: 0, count: 44)) else { throw MediaError.exportFailed }
+        let file = try FileHandle(forWritingTo: destination)
+        var finished = false
+        defer {
+            reader.cancelReading()
+            try? file.close()
+            if !finished { try? FileManager.default.removeItem(at: destination) }
+        }
+        try file.seekToEnd()
+        var pcmCount = 0
         while let sample = output.copyNextSampleBuffer() {
             if Task.isCancelled { reader.cancelReading(); throw CancellationError() }
-            autoreleasepool {
-                guard let block = CMSampleBufferGetDataBuffer(sample) else { return }
+            try autoreleasepool {
+                guard let block = CMSampleBufferGetDataBuffer(sample) else { throw MediaError.exportFailed }
                 let count = CMBlockBufferGetDataLength(block)
                 var bytes = [UInt8](repeating: 0, count: count)
                 let status = bytes.withUnsafeMutableBytes { buffer in
                     CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: count, destination: buffer.baseAddress!)
                 }
-                guard status == kCMBlockBufferNoErr else { return }
-                pcm.append(contentsOf: bytes)
+                guard status == kCMBlockBufferNoErr else { throw MediaError.exportFailed }
+                try file.write(contentsOf: bytes)
+                pcmCount += count
             }
         }
-        guard reader.status == .completed, !pcm.isEmpty else { throw reader.error ?? MediaError.exportFailed }
+        guard reader.status == .completed, pcmCount > 0 else { throw reader.error ?? MediaError.exportFailed }
         var wav = Data()
         func string(_ value: String) { wav.append(contentsOf: value.utf8) }
         func integer<T: FixedWidthInteger>(_ value: T) { var little = value.littleEndian; withUnsafeBytes(of: &little) { wav.append(contentsOf: $0) } }
-        string("RIFF"); integer(UInt32(36 + pcm.count)); string("WAVEfmt "); integer(UInt32(16))
+        string("RIFF"); integer(UInt32(36 + pcmCount)); string("WAVEfmt "); integer(UInt32(16))
         integer(UInt16(1)); integer(UInt16(1)); integer(UInt32(16000)); integer(UInt32(32000))
-        integer(UInt16(2)); integer(UInt16(16)); string("data"); integer(UInt32(pcm.count)); wav.append(pcm)
-        try wav.write(to: destination, options: .atomic)
+        integer(UInt16(2)); integer(UInt16(16)); string("data"); integer(UInt32(pcmCount))
+        try file.seek(toOffset: 0)
+        try file.write(contentsOf: wav)
+        finished = true
+    }
+}
+
+/// One generator serves all samples in a segment. A 100 ms tolerance avoids unrelated keyframes.
+public final class FrameDecoder {
+    private let generator: AVAssetImageGenerator
+    public init(url: URL) {
+        generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 640, height: 480)
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.1, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = generator.requestedTimeToleranceBefore
+    }
+    public func write(at seconds: Double, destination: URL) async throws {
+        try Task.checkCancellation()
+        defer { generator.cancelAllCGImageGeneration() }
+        try await withTaskCancellationHandler {
+            let (image, actual) = try await generator.image(at: CMTime(seconds: seconds, preferredTimescale: 600))
+            try Task.checkCancellation()
+            guard abs(actual.seconds - seconds) <= 0.101 else { throw MediaError.exportFailed }
+            try save(image, to: destination)
+        } onCancel: { [generator] in generator.cancelAllCGImageGeneration() }
+    }
+    public func write(times: [Double], directory: URL) async throws -> [URL] {
+        try Task.checkCancellation()
+        defer { generator.cancelAllCGImageGeneration() }
+        return try await withTaskCancellationHandler {
+            let requested = times.map { CMTime(seconds: $0, preferredTimescale: 600) }
+            let destinations = times.indices.map { directory.appendingPathComponent("frame-\($0).jpg") }
+            var completed = Set<Int>()
+            for await result in generator.images(for: requested) {
+                try Task.checkCancellation()
+                switch result {
+                case .success(let time, let image, let actual):
+                    guard abs(time.seconds - actual.seconds) <= 0.101,
+                          let index = requested.firstIndex(of: time) else { throw MediaError.exportFailed }
+                    try save(image, to: destinations[index])
+                    completed.insert(index)
+                case .failure(_, let error): throw error
+                }
+            }
+            guard completed.count == times.count else { throw MediaError.exportFailed }
+            return destinations
+        } onCancel: { [generator] in generator.cancelAllCGImageGeneration() }
+    }
+    private func save(_ image: CGImage, to destination: URL) throws {
+        guard let output = CGImageDestinationCreateWithURL(destination as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { throw MediaError.exportFailed }
+        CGImageDestinationAddImage(output, image, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
+        guard CGImageDestinationFinalize(output) else { throw MediaError.exportFailed }
     }
 }
 
@@ -252,7 +303,10 @@ public enum LibraryScanner {
         for (index, url) in files.enumerated() {
             try Task.checkCancellation()
             do {
-                if let clip = try await scanFile(url: url, folder: folder, root: root, old: old, thumbnails: thumbnails) { clips.append(clip) }
+                if let clip = try await scanFile(url: url, folder: folder, root: root, old: old, thumbnails: thumbnails) {
+                    clips.append(clip)
+                    if let error = clip.transcriptError { errors.append("\(clip.name): \(error)") }
+                }
             } catch is CancellationError { throw CancellationError() }
             catch { errors.append("\(url.lastPathComponent): \(error.localizedDescription)") }
             if let progress, (index + 1) % 10 == 0 || index + 1 == files.count {
@@ -286,6 +340,7 @@ public enum LibraryScanner {
                 }
             }
             cached.indexError = nil
+            refreshSubtitles(for: &cached)
             return cached
         }
 
@@ -311,7 +366,7 @@ public enum LibraryScanner {
 
         case .audio:
             let meta = try await audioMetadata(url: url)
-            return FootageClip(
+            var clip = FootageClip(
                 id: id, folderID: folder.id, path: url.path,
                 relativePath: relativePath,
                 fileSize: size, modifiedAt: date, duration: meta.duration,
@@ -320,30 +375,53 @@ public enum LibraryScanner {
                 segments: SegmentPlanner.segments(duration: meta.duration),
                 mediaType: .audio
             )
+            refreshSubtitles(for: &clip)
+            return clip
 
         case .video:
             let metadata = try await MediaProcessor.metadata(url: url)
             if let thumbnail {
                 try await MediaProcessor.frame(url: url, at: min(1, metadata.duration / 2), destination: thumbnails.appendingPathComponent(thumbnail))
             }
-            let srtURL = url.deletingPathExtension().appendingPathExtension("srt")
-            let vttURL = url.deletingPathExtension().appendingPathExtension("vtt")
-            var transcripts: [TranscriptCue] = []
-            if FileManager.default.fileExists(atPath: srtURL.path) {
-                transcripts = SubtitleParser.parse(url: srtURL)
-            } else if FileManager.default.fileExists(atPath: vttURL.path) {
-                transcripts = SubtitleParser.parse(url: vttURL)
-            }
-            return FootageClip(
+            var clip = FootageClip(
                 id: id, folderID: folder.id, path: url.path,
                 relativePath: relativePath,
                 fileSize: size, modifiedAt: date, duration: metadata.duration,
                 width: metadata.width, height: metadata.height, frameRate: metadata.frameRate,
                 hasAudio: metadata.hasAudio, thumbnail: thumbnail,
                 segments: SegmentPlanner.segments(duration: metadata.duration),
-                transcripts: transcripts, mediaType: .video
+                mediaType: .video
             )
+            refreshSubtitles(for: &clip)
+            return clip
         }
+    }
+
+    public static func refreshSubtitles(for clip: inout FootageClip) {
+        guard !clip.isImage else { return }
+        let sidecar = ["srt", "vtt"].map { clip.url.deletingPathExtension().appendingPathExtension($0) }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
+        guard let sidecar else {
+            if clip.transcriptSource == "subtitle" {
+                clip.transcripts = []; clip.transcribedAt = nil; clip.transcriptOffset = 0
+                clip.transcriptSource = nil; clip.subtitleFingerprint = nil
+            }
+            return
+        }
+        guard let data = try? Data(contentsOf: sidecar) else {
+            clip.transcriptError = "Subtitle tidak dapat dibaca: \(sidecar.lastPathComponent)"
+            return
+        }
+        let fingerprint = sidecar.lastPathComponent + ":" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard fingerprint != clip.subtitleFingerprint else { return }
+        let cues = SubtitleParser.parse(text: String(data: data, encoding: .utf8) ?? "")
+        guard !cues.isEmpty else {
+            clip.transcriptError = "Subtitle tidak valid: \(sidecar.lastPathComponent)"
+            return
+        }
+        clip.transcripts = cues; clip.transcriptSource = "subtitle"
+        clip.subtitleFingerprint = fingerprint; clip.transcribedAt = Date()
+        clip.transcriptOffset = clip.duration; clip.transcriptError = nil
     }
 }
 
@@ -358,27 +436,32 @@ public enum SubtitleParser {
         for block in blocks {
             let lines = block.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
             guard lines.count >= 2 else { continue }
-            let timeLine = lines.first { $0.contains("-->") } ?? ""
-            guard !timeLine.isEmpty else { continue }
+            guard let timeIndex = lines.firstIndex(where: { $0.contains("-->") }) else { continue }
+            let timeLine = lines[timeIndex]
             let parts = timeLine.components(separatedBy: "-->")
             guard parts.count == 2 else { continue }
-            let start = parseTime(parts[0].trimmingCharacters(in: .whitespaces))
-            let end = parseTime(parts[1].trimmingCharacters(in: .whitespaces))
-            let textLines = lines.filter { $0 != timeLine && Int($0) == nil }
+            guard let startToken = parts[0].split(whereSeparator: { $0.isWhitespace }).first,
+                  let endToken = parts[1].split(whereSeparator: { $0.isWhitespace }).first,
+                  let start = parseTime(String(startToken)), let end = parseTime(String(endToken)) else { continue }
+            let textLines = lines.dropFirst(timeIndex + 1)
             let cueText = textLines.joined(separator: " ").trimmingCharacters(in: .whitespaces)
             guard !cueText.isEmpty, end > start else { continue }
             cues.append(TranscriptCue(start: start, end: end, text: cueText))
         }
         return cues
     }
-    private static func parseTime(_ string: String) -> Double {
+    private static func parseTime(_ string: String) -> Double? {
         let clean = string.replacingOccurrences(of: ",", with: ".")
-        let components = clean.split(separator: ":").compactMap { Double($0) }
+        let parts = clean.split(separator: ":", omittingEmptySubsequences: false)
+        let components = parts.compactMap { Double($0) }
+        guard components.count == parts.count, (2...3).contains(parts.count),
+              components.allSatisfy({ $0.isFinite && $0 >= 0 }),
+              components.last! < 60, components[components.count - 2] < 60 else { return nil }
         if components.count == 3 {
             return components[0] * 3600 + components[1] * 60 + components[2]
         } else if components.count == 2 {
             return components[0] * 60 + components[1]
         }
-        return Double(clean) ?? 0
+        return nil
     }
 }

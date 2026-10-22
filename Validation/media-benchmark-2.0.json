@@ -1,0 +1,56 @@
+{
+  "date" : "2026-10-22T07:07:13Z",
+  "measurements" : [
+    {
+      "file" : "h264-1920x1080.mp4",
+      "frames" : 6,
+      "height" : 1080,
+      "perFrameGeneratorMedianMS" : 123.75387499999999,
+      "reusedBatchMedianMS" : 59.480499999999999,
+      "width" : 1920
+    },
+    {
+      "file" : "h264-640x360.mp4",
+      "frames" : 6,
+      "height" : 360,
+      "perFrameGeneratorMedianMS" : 74.778499999999994,
+      "reusedBatchMedianMS" : 35.047041999999998,
+      "width" : 640
+    },
+    {
+      "file" : "hevc-1920x1080.mp4",
+      "frames" : 6,
+      "height" : 1080,
+      "perFrameGeneratorMedianMS" : 96.978291999999996,
+      "reusedBatchMedianMS" : 48.371915999999999,
+      "width" : 1920
+    },
+    {
+      "file" : "hevc-640x360.mp4",
+      "frames" : 6,
+      "height" : 360,
+      "perFrameGeneratorMedianMS" : 67.835291999999995,
+      "reusedBatchMedianMS" : 30.516874999999999,
+      "width" : 640
+    },
+    {
+      "file" : "prores-1920x1080.mov",
+      "frames" : 6,
+      "height" : 1080,
+      "perFrameGeneratorMedianMS" : 216.15475000000001,
+      "reusedBatchMedianMS" : 66.668333000000004,
+      "width" : 1920
+    },
+    {
+      "file" : "prores-640x360.mov",
+      "frames" : 6,
+      "height" : 360,
+      "perFrameGeneratorMedianMS" : 215.24479199999999,
+      "reusedBatchMedianMS" : 56.751041999999998,
+      "width" : 640
+    }
+  ],
+  "peakRSSBytes" : 30588928,
+  "scope" : "three warm runs per codec; async per-frame generators versus reused async batches; includes JPEG writing",
+  "timestampToleranceMS" : 100
+}

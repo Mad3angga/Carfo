@@ -8,7 +8,9 @@ let package = Package(
     targets: [
         .target(name: "CarfoCore"),
         .executableTarget(name: "Carfo", dependencies: ["CarfoCore"], resources: [.copy("Resources/Engine"), .copy("Resources/CarfoIcon.png"), .copy("Resources/CarfoMenuBarIcon.png"), .copy("Resources/Carfo.icns")]),
-        .testTarget(name: "CarfoCoreTests", dependencies: ["CarfoCore"])
+        .testTarget(name: "CarfoCoreTests", dependencies: ["CarfoCore"]),
+        .testTarget(name: "CarfoWorkflowTests", dependencies: ["Carfo", "CarfoCore"]),
+        .executableTarget(name: "CarfoBenchmark", dependencies: ["CarfoCore"])
     ],
     swiftLanguageModes: [.v5]
 )

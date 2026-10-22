@@ -123,6 +123,9 @@ public struct FootageClip: Codable, Identifiable, Equatable, Sendable {
     /// Set once speech-to-text (or a sidecar subtitle) has produced `transcripts`, even if the clip has no speech.
     public var transcribedAt: Date?
     public var transcriptError: String?
+    public var transcriptSource: String?
+    public var subtitleFingerprint: String?
+    public var transcriptOffset: Double = 0
     public var indexedAt: Date?
     public var indexError: String?
     public var mediaType: MediaType
@@ -147,7 +150,7 @@ public struct FootageClip: Codable, Identifiable, Equatable, Sendable {
         self.transcripts = transcripts; self.transcribedAt = transcribedAt; self.transcriptError = transcriptError; self.mediaType = mediaType
     }
     enum CodingKeys: String, CodingKey {
-        case id, folderID, path, relativePath, fileSize, modifiedAt, duration, width, height, frameRate, hasAudio, thumbnail, segments, indexedAt, indexError, transcripts, transcribedAt, transcriptError, mediaType
+        case id, folderID, path, relativePath, fileSize, modifiedAt, duration, width, height, frameRate, hasAudio, thumbnail, segments, indexedAt, indexError, transcripts, transcribedAt, transcriptError, mediaType, transcriptSource, subtitleFingerprint, transcriptOffset
     }
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -169,6 +172,9 @@ public struct FootageClip: Codable, Identifiable, Equatable, Sendable {
         transcripts = try container.decodeIfPresent([TranscriptCue].self, forKey: .transcripts) ?? []
         transcribedAt = try container.decodeIfPresent(Date.self, forKey: .transcribedAt)
         transcriptError = try container.decodeIfPresent(String.self, forKey: .transcriptError)
+        transcriptSource = try container.decodeIfPresent(String.self, forKey: .transcriptSource)
+        subtitleFingerprint = try container.decodeIfPresent(String.self, forKey: .subtitleFingerprint)
+        transcriptOffset = try container.decodeIfPresent(Double.self, forKey: .transcriptOffset) ?? 0
         mediaType = try container.decodeIfPresent(MediaType.self, forKey: .mediaType)
             ?? MediaType.from(extension: URL(fileURLWithPath: path).pathExtension)
     }

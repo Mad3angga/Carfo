@@ -1,0 +1,55 @@
+{
+  "build" : "2.0-candidate",
+  "cache" : "fresh databases; seven warm in-memory searches; no OS cache flush",
+  "date" : "2026-10-22T07:00:38Z",
+  "dimensions" : 768,
+  "hardware" : "arm64",
+  "inference" : {
+    "afterForcedIdleQueryMS" : 4027.4105410000002,
+    "forcedIdleSeconds" : 0.10000000000000001,
+    "modelReadyMS" : 4682.6485410000005,
+    "productionIdleSeconds" : 300,
+    "stopMS" : 0.099042000000000005,
+    "warmQueryMS" : 199.475167
+  },
+  "measurements" : [
+    {
+      "clips" : 100,
+      "fullReadMS" : 6.1221249999999996,
+      "initialWriteMS" : 32.548166999999999,
+      "metadataReadMS" : 0.49879200000000001,
+      "segments" : 1000,
+      "singleSegmentWriteMS" : 5.9326670000000004,
+      "statsDeltaMS" : 0.00091699999999999995,
+      "textMedianMS" : 0.91833399999999998,
+      "vectorMedianMS" : 6.814584
+    },
+    {
+      "clips" : 500,
+      "fullReadMS" : 76.561042,
+      "initialWriteMS" : 152.39108300000001,
+      "metadataReadMS" : 0.98420799999999997,
+      "segments" : 5000,
+      "singleSegmentWriteMS" : 7.1302500000000002,
+      "statsDeltaMS" : 0.0013749999999999999,
+      "textMedianMS" : 4.4474580000000001,
+      "vectorMedianMS" : 15.324083
+    },
+    {
+      "clips" : 1000,
+      "fullReadMS" : 148.985375,
+      "initialWriteMS" : 308.09004199999998,
+      "metadataReadMS" : 1.875542,
+      "segments" : 10000,
+      "singleSegmentWriteMS" : 10.495875,
+      "statsDeltaMS" : 0.00125,
+      "textMedianMS" : 8.9016249999999992,
+      "vectorMedianMS" : 30.085249999999998
+    }
+  ],
+  "memoryBytes" : 17179869184,
+  "os" : "Version 26.6.2 (Build 25G83)",
+  "peakRSSBytes" : 149766144,
+  "processors" : 8,
+  "scope" : "synthetic index only; excludes inference, UI rendering and media decoding"
+}

@@ -25,17 +25,19 @@ public actor LocalEngine {
     private let script: URL
     private let logDirectory: URL
     private var nextRequestId: UInt64 = 1
-    private var isRequestInFlight = false
+    private var requestOwner: UUID?
+    public let idleSeconds: TimeInterval
 
-    public init(installation: LocalModelInstallation, script: URL, logDirectory: URL) {
+    public init(installation: LocalModelInstallation, script: URL, logDirectory: URL, idleSeconds: TimeInterval = 300) {
         self.installation = installation; self.script = script; self.logDirectory = logDirectory
+        self.idleSeconds = idleSeconds
     }
     public func configure(_ value: LocalModelInstallation) {
         stop(); installation = value
     }
     public func stop() {
         idleTask?.cancel(); idleTask = nil
-        isRequestInFlight = false
+        requestOwner = nil
         if process?.isRunning == true { process?.terminate() }
         try? input?.close(); try? output?.close()
         process = nil; input = nil; output = nil; pending.removeAll()
@@ -44,8 +46,9 @@ public actor LocalEngine {
         guard process?.isRunning == true else { return }
         _ = try? await request(["op": "purge"], timeout: 10)
     }
-    private func resetIdleTimer(seconds: TimeInterval = 45) {
+    private func resetIdleTimer() {
         idleTask?.cancel()
+        let seconds = idleSeconds
         idleTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
@@ -120,35 +123,41 @@ public actor LocalEngine {
         guard let python = installation.pythonExecutable, let model = installation.modelDirectory else { throw EngineError.unavailable }
         let worker = Process()
         worker.executableURL = python
-        worker.arguments = ["-B", "-u", script.path, "--model", model.path] + (installation.whisperDirectory.map { ["--whisper", $0.path] } ?? [])
+        worker.arguments = ["-I", "-B", "-u", script.path, "--model", model.path] + (installation.whisperDirectory.map { ["--whisper", $0.path] } ?? [])
         var environment = ProcessInfo.processInfo.environment
         environment["HF_HUB_OFFLINE"] = "1"; environment["TRANSFORMERS_OFFLINE"] = "1"
         environment["HF_HUB_DISABLE_TELEMETRY"] = "1"; environment["DO_NOT_TRACK"] = "1"
         environment["TOKENIZERS_PARALLELISM"] = "false"; environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment.removeValue(forKey: "PYTHONPATH"); environment.removeValue(forKey: "PYTHONHOME")
+        environment["PYTHONNOUSERSITE"] = "1"
         worker.environment = environment
         let incoming = Pipe(), outgoing = Pipe()
         worker.standardInput = incoming; worker.standardOutput = outgoing
         let log = logDirectory.appendingPathComponent("engine.log")
         _ = FileManager.default.createFile(atPath: log.path, contents: nil)
-        worker.standardError = try FileHandle(forWritingTo: log)
+        let errorLog = try FileHandle(forWritingTo: log)
+        defer { try? errorLog.close() }
+        worker.standardError = errorLog
         try worker.run()
         process = worker; input = incoming.fileHandleForWriting; output = outgoing.fileHandleForReading
         pending.removeAll()
     }
-    public func request(_ payload: [String: Any], timeout: TimeInterval = 180) async throws -> [String: Any] {
+    public func request(_ payload: [String: Any], timeout: TimeInterval = 180) async throws -> sending [String: Any] {
         try Task.checkCancellation()
         idleTask?.cancel(); idleTask = nil
 
-        while isRequestInFlight {
+        while requestOwner != nil {
             try Task.checkCancellation()
             try await Task.sleep(for: .milliseconds(10))
         }
-        isRequestInFlight = true
-        defer { isRequestInFlight = false }
-
         try Task.checkCancellation()
         try start()
-        guard let input, let output else { throw EngineError.stopped }
+        let owner = UUID()
+        requestOwner = owner
+        defer {
+            if requestOwner == owner { requestOwner = nil; resetIdleTimer() }
+        }
+        guard let input, output != nil else { throw EngineError.stopped }
 
         let reqId = nextRequestId
         nextRequestId += 1
@@ -161,8 +170,9 @@ public actor LocalEngine {
 
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
+            guard requestOwner == owner else { throw EngineError.stopped }
             if Task.isCancelled {
-                resetIdleTimer()
+                stop()
                 throw CancellationError()
             }
 
@@ -206,7 +216,11 @@ public actor LocalEngine {
                     stop(); throw EngineError.stopped
                 }
                 // Yield the actor cooperatively
-                try await Task.sleep(for: .milliseconds(15))
+                do { try await Task.sleep(for: .milliseconds(15)) }
+                catch {
+                    if requestOwner == owner { stop() }
+                    throw error
+                }
             }
         }
         stop()

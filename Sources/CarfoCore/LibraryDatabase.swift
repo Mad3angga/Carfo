@@ -73,6 +73,12 @@ public final class LibraryDatabase: @unchecked Sendable {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS clip_state (
+            clip_id TEXT PRIMARY KEY,
+            transcript_source TEXT,
+            subtitle_fingerprint TEXT,
+            transcript_offset REAL NOT NULL DEFAULT 0
+        );
 
         CREATE TABLE IF NOT EXISTS folders (
             id TEXT PRIMARY KEY,
@@ -265,7 +271,7 @@ public final class LibraryDatabase: @unchecked Sendable {
                 sqlite3_bind_double(segStmt, 4, segment.end)
 
                 if let vData = Self.serializeEmbedding(segment.visualEmbedding) {
-                    vData.withUnsafeBytes { buf in
+                    _ = vData.withUnsafeBytes { buf in
                         sqlite3_bind_blob(segStmt, 5, buf.baseAddress, Int32(buf.count), SQLITE_TRANSIENT)
                     }
                 } else {
@@ -273,7 +279,7 @@ public final class LibraryDatabase: @unchecked Sendable {
                 }
 
                 if let aData = Self.serializeEmbedding(segment.audioEmbedding) {
-                    aData.withUnsafeBytes { buf in
+                    _ = aData.withUnsafeBytes { buf in
                         sqlite3_bind_blob(segStmt, 6, buf.baseAddress, Int32(buf.count), SQLITE_TRANSIENT)
                     }
                 } else {
@@ -299,7 +305,8 @@ public final class LibraryDatabase: @unchecked Sendable {
 
     public func removeClip(id: UUID) throws {
         try transaction {
-            guard let db else { throw DatabaseError.connectionFailed("Database tidak terbuka") }
+            guard db != nil else { throw DatabaseError.connectionFailed("Database tidak terbuka") }
+            _ = executeWithID("DELETE FROM clip_state WHERE clip_id = ?;", id: id)
 
             // Delete cues and transcripts
             _ = executeWithID("DELETE FROM clip_transcripts WHERE clip_id = ?;", id: id)
@@ -326,7 +333,7 @@ public final class LibraryDatabase: @unchecked Sendable {
                 sqlite3_bind_text(stmt, 1, folder.id.uuidString, -1, SQLITE_TRANSIENT)
                 sqlite3_bind_text(stmt, 2, folder.path, -1, SQLITE_TRANSIENT)
                 if let bm = folder.bookmark {
-                    bm.withUnsafeBytes { buf in
+                    _ = bm.withUnsafeBytes { buf in
                         sqlite3_bind_blob(stmt, 3, buf.baseAddress, Int32(buf.count), SQLITE_TRANSIENT)
                     }
                 } else {
@@ -414,7 +421,7 @@ public final class LibraryDatabase: @unchecked Sendable {
                     sqlite3_bind_text(fStmt, 1, folder.id.uuidString, -1, SQLITE_TRANSIENT)
                     sqlite3_bind_text(fStmt, 2, folder.path, -1, SQLITE_TRANSIENT)
                     if let bm = folder.bookmark {
-                        bm.withUnsafeBytes { buf in
+                        _ = bm.withUnsafeBytes { buf in
                             sqlite3_bind_blob(fStmt, 3, buf.baseAddress, Int32(buf.count), SQLITE_TRANSIENT)
                         }
                     } else { sqlite3_bind_null(fStmt, 3) }
@@ -445,7 +452,7 @@ public final class LibraryDatabase: @unchecked Sendable {
         }
     }
 
-    public func loadManifest() throws -> LibraryManifest {
+    public func loadManifest(metadataOnly: Bool = false) throws -> LibraryManifest {
         lock.lock()
         defer { lock.unlock() }
         guard let db else { throw DatabaseError.connectionFailed("Database tidak terbuka") }
@@ -499,7 +506,7 @@ public final class LibraryDatabase: @unchecked Sendable {
         var segmentCuesMap: [UUID: [TranscriptCue]] = [:]
         var segCueStmt: OpaquePointer?
         let segCueSql = "SELECT id, segment_id, start_time, end_time, text, speaker, embedding FROM segment_cues ORDER BY start_time ASC;"
-        if sqlite3_prepare_v2(db, segCueSql, -1, &segCueStmt, nil) == SQLITE_OK {
+        if !metadataOnly && sqlite3_prepare_v2(db, segCueSql, -1, &segCueStmt, nil) == SQLITE_OK {
             defer { sqlite3_finalize(segCueStmt) }
             while sqlite3_step(segCueStmt) == SQLITE_ROW {
                 guard let idPtr = sqlite3_column_text(segCueStmt, 0), let id = UUID(uuidString: String(cString: idPtr)),
@@ -526,7 +533,7 @@ public final class LibraryDatabase: @unchecked Sendable {
         var clipSegmentsMap: [UUID: [VideoSegment]] = [:]
         var segStmt: OpaquePointer?
         let segSql = "SELECT id, clip_id, start_time, end_time, visual_embedding, audio_embedding, transcript FROM segments ORDER BY start_time ASC;"
-        if sqlite3_prepare_v2(db, segSql, -1, &segStmt, nil) == SQLITE_OK {
+        if !metadataOnly && sqlite3_prepare_v2(db, segSql, -1, &segStmt, nil) == SQLITE_OK {
             defer { sqlite3_finalize(segStmt) }
             while sqlite3_step(segStmt) == SQLITE_ROW {
                 guard let idPtr = sqlite3_column_text(segStmt, 0), let segID = UUID(uuidString: String(cString: idPtr)),
@@ -561,7 +568,7 @@ public final class LibraryDatabase: @unchecked Sendable {
         var clipTranscriptsMap: [UUID: [TranscriptCue]] = [:]
         var trStmt: OpaquePointer?
         let trSql = "SELECT id, clip_id, start_time, end_time, text, speaker, embedding FROM clip_transcripts ORDER BY start_time ASC;"
-        if sqlite3_prepare_v2(db, trSql, -1, &trStmt, nil) == SQLITE_OK {
+        if !metadataOnly && sqlite3_prepare_v2(db, trSql, -1, &trStmt, nil) == SQLITE_OK {
             defer { sqlite3_finalize(trStmt) }
             while sqlite3_step(trStmt) == SQLITE_ROW {
                 guard let idPtr = sqlite3_column_text(trStmt, 0), let id = UUID(uuidString: String(cString: idPtr)),
@@ -668,6 +675,18 @@ public final class LibraryDatabase: @unchecked Sendable {
             }
         }
 
+        let positions = Dictionary(uniqueKeysWithValues: manifest.clips.indices.map { (manifest.clips[$0].id.uuidString, $0) })
+        var state: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT clip_id, transcript_source, subtitle_fingerprint, transcript_offset FROM clip_state;", -1, &state, nil) == SQLITE_OK else {
+            throw DatabaseError.executionFailed("Gagal membaca progres transkripsi")
+        }
+        defer { sqlite3_finalize(state) }
+        while sqlite3_step(state) == SQLITE_ROW {
+            guard let id = sqlite3_column_text(state, 0), let index = positions[String(cString: id)] else { continue }
+            if let source = sqlite3_column_text(state, 1) { manifest.clips[index].transcriptSource = String(cString: source) }
+            if let fingerprint = sqlite3_column_text(state, 2) { manifest.clips[index].subtitleFingerprint = String(cString: fingerprint) }
+            manifest.clips[index].transcriptOffset = sqlite3_column_double(state, 3)
+        }
         return manifest
     }
 
@@ -702,6 +721,16 @@ public final class LibraryDatabase: @unchecked Sendable {
 
     private func internalSaveClip(_ clip: FootageClip) throws {
         guard let db else { throw DatabaseError.connectionFailed("Database tidak terbuka") }
+        var state: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO clip_state VALUES (?, ?, ?, ?);", -1, &state, nil) == SQLITE_OK else {
+            throw DatabaseError.executionFailed("Gagal menyiapkan progres transkripsi")
+        }
+        defer { sqlite3_finalize(state) }
+        sqlite3_bind_text(state, 1, clip.id.uuidString, -1, SQLITE_TRANSIENT)
+        if let source = clip.transcriptSource { sqlite3_bind_text(state, 2, source, -1, SQLITE_TRANSIENT) }
+        if let fingerprint = clip.subtitleFingerprint { sqlite3_bind_text(state, 3, fingerprint, -1, SQLITE_TRANSIENT) }
+        sqlite3_bind_double(state, 4, clip.transcriptOffset)
+        guard sqlite3_step(state) == SQLITE_DONE else { throw DatabaseError.executionFailed("Gagal menyimpan progres transkripsi") }
 
         var clipStmt: OpaquePointer?
         let clipSql = """
@@ -775,13 +804,13 @@ public final class LibraryDatabase: @unchecked Sendable {
             sqlite3_bind_double(segStmt, 4, seg.end)
 
             if let vData = Self.serializeEmbedding(seg.visualEmbedding) {
-                vData.withUnsafeBytes { buf in
+                _ = vData.withUnsafeBytes { buf in
                     sqlite3_bind_blob(segStmt, 5, buf.baseAddress, Int32(buf.count), SQLITE_TRANSIENT)
                 }
             } else { sqlite3_bind_null(segStmt, 5) }
 
             if let aData = Self.serializeEmbedding(seg.audioEmbedding) {
-                aData.withUnsafeBytes { buf in
+                _ = aData.withUnsafeBytes { buf in
                     sqlite3_bind_blob(segStmt, 6, buf.baseAddress, Int32(buf.count), SQLITE_TRANSIENT)
                 }
             } else { sqlite3_bind_null(segStmt, 6) }
@@ -822,7 +851,7 @@ public final class LibraryDatabase: @unchecked Sendable {
             } else { sqlite3_bind_null(trStmt, 6) }
 
             if let embData = Self.serializeEmbedding(cue.embedding) {
-                embData.withUnsafeBytes { buf in
+                _ = embData.withUnsafeBytes { buf in
                     sqlite3_bind_blob(trStmt, 7, buf.baseAddress, Int32(buf.count), SQLITE_TRANSIENT)
                 }
             } else { sqlite3_bind_null(trStmt, 7) }
@@ -856,7 +885,7 @@ public final class LibraryDatabase: @unchecked Sendable {
             } else { sqlite3_bind_null(cueStmt, 6) }
 
             if let embData = Self.serializeEmbedding(cue.embedding) {
-                embData.withUnsafeBytes { buf in
+                _ = embData.withUnsafeBytes { buf in
                     sqlite3_bind_blob(cueStmt, 7, buf.baseAddress, Int32(buf.count), SQLITE_TRANSIENT)
                 }
             } else { sqlite3_bind_null(cueStmt, 7) }

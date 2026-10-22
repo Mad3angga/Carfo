@@ -110,7 +110,7 @@ struct MenuBarView: View {
                     .font(CarfoDesign.font(13, weight: .regular))
                     .foregroundStyle(Color.primary)
                 Spacer()
-                Toggle("", isOn: Binding(get: { model.launchAtLogin }, set: model.setLaunchAtLogin))
+                Toggle("", isOn: Binding(get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) }))
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .controlSize(.small)
@@ -320,7 +320,7 @@ struct SettingsView: View {
                                             .help(folder.path)
                                     }
                                     Spacer()
-                                    let clipCount = model.library.clips.filter { $0.folderID == folder.id }.count
+                                    let clipCount = model.stats.folderCounts[folder.id, default: 0]
                                     Text("\(clipCount.formatted()) file")
                                         .font(CarfoDesign.font(12))
                                         .foregroundStyle(CarfoDesign.secondary)
@@ -529,7 +529,7 @@ struct SettingsView: View {
                                     .foregroundStyle(CarfoDesign.secondary)
                             }
                             Spacer()
-                            Toggle("", isOn: Binding(get: { model.launchAtLogin }, set: model.setLaunchAtLogin))
+                            Toggle("", isOn: Binding(get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) }))
                                 .labelsHidden()
                                 .toggleStyle(.switch)
                                 .controlSize(.small)
@@ -559,7 +559,7 @@ struct SettingsView: View {
                 // Footer
                 HStack {
                     Spacer()
-                    Text("Carfo 1.0")
+                    Text("Carfo \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0")")
                 }
                 .font(CarfoDesign.font(10.5))
                 .foregroundStyle(CarfoDesign.secondary)

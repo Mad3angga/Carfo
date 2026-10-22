@@ -247,11 +247,12 @@ final class CarfoCoreTests: XCTestCase {
         XCTAssertEqual(cues[1].start, 134)
         XCTAssertEqual(cues[1].text, "Kita jalan dulu, kabutnya mulai turun.")
     }
-    func testRealAudioExtractionIfPresent() async throws {
-        let path = "/Users/apple/Documents/KERJAAN/PLAYGROUND/David laid podcast/Final render.mp4"
-        guard FileManager.default.fileExists(atPath: path) else { return }
+    func testFixtureAudioExtractionIfPresent() async throws {
+        let path = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(".runtime/Fixtures/Videos/Test red.mp4").path
+        guard FileManager.default.fileExists(atPath: path) else { throw XCTSkip("Generate the repository media fixtures first") }
         let dest = try temporaryDirectory().appendingPathComponent("real.wav")
-        try await MediaProcessor.audio(url: URL(fileURLWithPath: path), segment: VideoSegment(start: 0, end: 10), destination: dest)
+        try await MediaProcessor.audio(url: URL(fileURLWithPath: path), segment: VideoSegment(start: 0, end: 1), destination: dest)
         let data = try Data(contentsOf: dest)
         XCTAssertGreaterThan(data.count, 44)
     }
@@ -411,7 +412,7 @@ final class CarfoCoreTests: XCTestCase {
         XCTAssertEqual(results.count, 10)
         // Top match should be clip_0 (angle 0 => [1, 0])
         XCTAssertEqual(results.first?.clip.name, "clip_0.mov")
-        XCTAssertEqual(results.first?.score ?? 0, 1.0, accuracy: 0.001)
+        XCTAssertEqual(results.first?.score ?? 0, 1.35, accuracy: 0.001)
         // Verify scores are strictly descending
         for i in 0..<(results.count - 1) {
             XCTAssertGreaterThanOrEqual(results[i].score, results[i + 1].score)
@@ -466,7 +467,7 @@ final class CarfoCoreTests: XCTestCase {
         let instant = SearchEngine.search(clips: [a, b], query: "jalan", mode: .video, embedding: nil)
         XCTAssertEqual(instant.count, 1)
         XCTAssertEqual(instant.first?.clip.id, a.id)
-        XCTAssertEqual(instant.first?.score, 0)
+        XCTAssertEqual(instant.first?.score, 0.35)
 
         // Phase 2: Semantic search with embedding (querying for [1, 0])
         let semantic = SearchEngine.search(clips: [a, b], query: "jalan", mode: .video, embedding: [1, 0])
@@ -564,7 +565,7 @@ final class CarfoCoreTests: XCTestCase {
         let engine = LocalEngine(installation: installation, script: script, logDirectory: directory)
 
         let task1 = Task {
-            try await engine.request(["op": "slow"])
+            _ = try await engine.request(["op": "slow"])
         }
         try await Task.sleep(for: .milliseconds(30))
         task1.cancel()

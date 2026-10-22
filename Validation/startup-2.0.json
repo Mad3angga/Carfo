@@ -1,0 +1,6 @@
+{
+  "indexReadyMS": 292.275625,
+  "metadataReadyMS": 288.000917,
+  "searchViewAppearedMS": 193.053334,
+  "scope": "Isolated empty library; SwiftUI lifecycle measured from AppModel creation; excludes app launch time"
+}

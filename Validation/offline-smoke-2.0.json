@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "scope": "offline synthetic worker smoke, all modalities; not retrieval quality",
+  "operations": [
+    "verify",
+    "text",
+    "images",
+    "audio",
+    "texts",
+    "transcribe"
+  ],
+  "elapsedSeconds": 7.6965053750318475
+}
