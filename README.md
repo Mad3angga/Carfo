@@ -43,7 +43,7 @@ Kueri di atas adalah contoh penggunaan. Hasil bergantung pada isi koleksi dan pr
 
 ## Persyaratan
 
-- Mac dengan Apple Silicon dan macOS 26.2 atau lebih baru untuk bundle runtime Carfo 2.0. Biner MLX bawaan membutuhkan versi macOS ini.
+- Mac dengan Apple Silicon dan macOS 14.0 atau lebih baru.
 - Ruang penyimpanan untuk aplikasi, indeks koleksi, dan thumbnail. Kebutuhannya bergantung pada ukuran koleksi media.
 
 Anda tidak perlu menginstal Python, menyiapkan API key, atau menjalankan server.

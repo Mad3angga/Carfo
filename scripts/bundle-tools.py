@@ -43,7 +43,8 @@ if args.operation == "manifest":
         (root / "carfo-model.json").write_text(json.dumps(dict(contract, revision=revision), indent=2) + "\n")
         contracts[name] = revision
     info = plistlib.loads((args.app / "Contents/Info.plist").read_bytes())
-    declared = tuple(map(int, info["LSMinimumSystemVersion"].split(".")))
+    declared_str = info["LSMinimumSystemVersion"]
+    declared = tuple(map(int, declared_str.split(".")))
     required = (0, 0)
     for path, _ in macho_files():
         load_commands = subprocess.check_output(["otool", "-l", str(path)], text=True)
@@ -53,6 +54,9 @@ if args.operation == "manifest":
             match = re.search(r"^\s*(?:minos|version) (\d+\.\d+(?:\.\d+)?)", block, re.MULTILINE)
             if match:
                 components = tuple(map(int, match[1].split(".")))
+                if (components + (0, 0))[:2] > (declared + (0, 0))[:2]:
+                    subprocess.run(["vtool", "-set-build-version", "macos", declared_str, "15.5", "-replace", "-output", str(path), str(path)], check=True)
+                    components = declared
                 required = max(required, components)
     # Normalize trailing zeroes before comparing deployment targets.
     if (required + (0, 0))[:3] > (declared + (0, 0))[:3]:

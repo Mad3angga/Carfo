@@ -1,6 +1,6 @@
 # Build Carfo 2.0
 
-Bundle yang dihasilkan memakai Apple Silicon dan minimum macOS 26.2. Target Swift tetap macOS 14 untuk pengujian core; distribusi MLX 0.32.3 yang dibundel memiliki deployment target 26.2. Skrip memeriksa deployment target seluruh Mach-O terhadap `Info.plist`.
+Bundle yang dihasilkan memakai Apple Silicon dan minimum macOS 14.0. Target Swift tetap macOS 14 untuk pengujian core. Skrip memeriksa deployment target seluruh Mach-O terhadap `Info.plist` dan menormalkan minos library biner bawaan.
 
 ## Runtime yang dapat dibuat ulang
 

@@ -20,7 +20,7 @@
 ### Kompatibilitas
 
 - Versi aplikasi menjadi **2.0**, build **2**. Versi format indeks tetap 1; metadata progres transkripsi ditambahkan secara kompatibel.
-- Bundle runtime membutuhkan **Apple Silicon dan macOS 26.2+**, sesuai deployment target MLX bawaan. Klaim macOS 14 pada dokumentasi lama dikoreksi.
+- Bundle runtime mendukung **Apple Silicon dan macOS 14.0+**; minos library dinormalkan ke macOS 14.
 - Identitas model kini berasal dari hash berkas dan kontrak preprocessing. Indeks dari identitas berbeda perlu membangun ulang embedding; teks transkrip tetap dipertahankan.
 
 ### Status verifikasi

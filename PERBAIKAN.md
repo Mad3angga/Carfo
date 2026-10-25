@@ -20,7 +20,7 @@ Daftar ini berasal dari audit kode dan pengujian lokal pada kondisi working tree
 | CF-19 | Selesai secara lokal: dependency injection direktori/defaults/instalasi/worker, regresi CF-01–CF-08 dan workflow AppModel, fixture tanpa path pribadi, CI strict concurrency dengan warnings-as-errors dan actor data race checks. Eksekusi CI remote belum dilakukan. |
 | CF-20 | Sebagian: baseline indeks, inferensi dingin/hangat/setelah idle, pembatalan, codec, audio streaming, dan tahap startup disimpan. **Masih terbuka:** throughput indexing penuh, profil main thread Instruments, RAM worker selama indexing panjang, kualitas retrieval representatif, serta batas rilis untuk metrik tersebut. |
 
-Rincian: [CHANGELOG.md](CHANGELOG.md), [BUILDING.md](BUILDING.md), [Validation/README.md](Validation/README.md). Angka adalah pengukuran lokal, bukan jaminan performa perangkat lain. Minimum bundle dikoreksi menjadi macOS 26.2 berdasarkan deployment target biner MLX bawaan.
+Rincian: [CHANGELOG.md](CHANGELOG.md), [BUILDING.md](BUILDING.md), [Validation/README.md](Validation/README.md). Angka adalah pengukuran lokal, bukan jaminan performa perangkat lain. Minimum bundle adalah macOS 14.0 (minos library biner dinormalkan ke 14.0).
 
 Prioritas:
 
