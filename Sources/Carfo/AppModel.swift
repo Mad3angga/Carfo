@@ -179,8 +179,10 @@ final class AppModel: ObservableObject {
         defaults.removeObject(forKey: "modelPath")
         let detected = installationOverride ?? LocalModelInstallation.discover(pythonOverride: defaults.string(forKey: "pythonPath"))
         installation = detected
-        let script = workerScript ?? Bundle.main.url(forResource: "worker", withExtension: "py", subdirectory: "Engine")
-            ?? Bundle.module.url(forResource: "Engine", withExtension: nil)!.appendingPathComponent("worker.py")
+        guard let script = workerScript ?? AppResources.bundle.url(forResource: "worker", withExtension: "py", subdirectory: "Engine") else {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError,
+                          userInfo: [NSLocalizedDescriptionKey: "Komponen pemrosesan Carfo tidak ditemukan. Instal ulang aplikasi Carfo."])
+        }
         engine = LocalEngine(installation: detected, script: script, logDirectory: root)
         startupTask = Task { [weak self, store] in
             guard let self else { return }
@@ -309,6 +311,8 @@ final class AppModel: ObservableObject {
         picker.title = "Tambah folder footage"
         picker.prompt = "Tambah folder"
         picker.canChooseDirectories = true; picker.canChooseFiles = false; picker.allowsMultipleSelection = true
+        picker.level = .modalPanel
+        NSApp.activate(ignoringOtherApps: true)
         picker.begin { [weak self] response in
             guard response == .OK else { return }
             Task { @MainActor in self?.addFolders(picker.urls) }

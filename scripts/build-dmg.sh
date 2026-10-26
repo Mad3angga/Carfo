@@ -81,6 +81,7 @@ else
     exit 1
 fi
 codesign --verify --deep --strict "$MOUNT_DIR/Carfo.app"
+"$MOUNT_DIR/Carfo.app/Contents/Resources/Python/bin/python3" -I -B scripts/smoke-startup.py "$MOUNT_DIR/Carfo.app" --output "$PROJECT_ROOT/build/dmg-startup-smoke.json"
 if [[ "$DISTRIBUTION" == 1 ]]; then
     spctl --assess --type execute --verbose=2 "$MOUNT_DIR/Carfo.app"
 fi

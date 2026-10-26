@@ -13,6 +13,8 @@ DISTRIBUTION="${DISTRIBUTION:-0}"
 if [[ "$DISTRIBUTION" == 1 ]]; then
     [[ "$SIGNING_IDENTITY" == "Developer ID Application:"* ]] || { print -u2 "Developer ID Application signing identity required"; exit 1; }
     : "${NOTARY_PROFILE:?Set NOTARY_PROFILE to a notarytool keychain profile}"
+else
+    print -u2 "Local test build: ad hoc signature; Developer ID and notarization are required for distribution."
 fi
 [[ -f "$MODEL_SRC/config.json" && -f "$WHISPER_SRC/config.json" ]] || { print -u2 "Both model configurations are required"; exit 1; }
 [[ -f "$MODEL_SRC/model.safetensors" || -f "$MODEL_SRC/model.safetensors.index.json" ]] || { print -u2 "Embedding weights missing"; exit 1; }
@@ -42,6 +44,7 @@ PYTHON="$APP_PATH/Contents/Resources/Python/bin/python3"
 "$PYTHON" -I scripts/bundle-tools.py sign "$APP_PATH" --identity "$SIGNING_IDENTITY"
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 "$PYTHON" -I -B scripts/smoke-bundle.py "$APP_PATH" --output "$STAGING/offline-smoke.json"
+"$PYTHON" -I -B scripts/smoke-startup.py "$APP_PATH" --output "$STAGING/startup-smoke.json"
 if [[ "$DISTRIBUTION" == 1 ]]; then
     ditto -c -k --keepParent "$APP_PATH" "$STAGING/Carfo.zip"
     xcrun notarytool submit "$STAGING/Carfo.zip" --keychain-profile "$NOTARY_PROFILE" --wait
@@ -54,4 +57,5 @@ if [[ -d build/Carfo.app ]]; then
 fi
 mv "$APP_PATH" build/Carfo.app
 cp "$STAGING/offline-smoke.json" build/offline-smoke.json
+cp "$STAGING/startup-smoke.json" build/startup-smoke.json
 print "Bundle verified: $PROJECT_ROOT/build/Carfo.app (distribution=$DISTRIBUTION)"

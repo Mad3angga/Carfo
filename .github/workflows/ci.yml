@@ -18,4 +18,4 @@ jobs:
         run: |
           zsh -n scripts/build-app.sh
           zsh -n scripts/build-dmg.sh
-          python3 -m py_compile scripts/runtime-manifest.py scripts/prepare-runtime.py scripts/bundle-tools.py
+          python3 -m py_compile scripts/runtime-manifest.py scripts/prepare-runtime.py scripts/bundle-tools.py scripts/smoke-startup.py

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.1 · 26 Oktober 2026 · Perbaikan startup
+
+- Resource pada app terkemas dibaca dari `Contents/Resources`, sehingga startup tidak bergantung pada folder build komputer pengembang.
+- Startup tidak lagi memasang ikon pada file executable, yang dapat membuat signature tidak valid.
+- Worker yang hilang dilaporkan sebagai error instalasi tanpa force unwrap.
+- Packaging menguji startup dengan folder `.build` diblokir dan memverifikasi signature setelah app berjalan.
+- Versi aplikasi menjadi **2.0.1**, build **3**. Developer ID dan notarization tetap diperlukan untuk distribusi normal.
+
 ## 2.0 · 22 Oktober 2026 · Kandidat lokal
 
 ### Perubahan

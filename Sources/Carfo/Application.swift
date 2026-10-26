@@ -17,11 +17,11 @@ enum CarfoApplication {
 
     @MainActor private static func setupApplicationIcon(_ app: NSApplication) {
         let icon: NSImage? = {
-            if let url = Bundle.module.url(forResource: "Carfo", withExtension: "icns"),
+            if let url = AppResources.bundle.url(forResource: "Carfo", withExtension: "icns"),
                let image = NSImage(contentsOf: url) {
                 return image
             }
-            if let url = Bundle.module.url(forResource: "CarfoIcon", withExtension: "png"),
+            if let url = AppResources.bundle.url(forResource: "CarfoIcon", withExtension: "png"),
                let image = NSImage(contentsOf: url) {
                 return image
             }
@@ -34,10 +34,6 @@ enum CarfoApplication {
 
         guard let icon else { return }
         app.applicationIconImage = icon
-
-        if let executablePath = Bundle.main.executablePath {
-            NSWorkspace.shared.setIcon(icon, forFile: executablePath, options: [])
-        }
     }
 }
 
@@ -132,7 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     private static func makeMenuBarIcon() -> NSImage {
         let size = NSSize(width: 18, height: 18)
-        if let url = Bundle.module.url(forResource: "CarfoMenuBarIcon", withExtension: "png"),
+        if let url = AppResources.bundle.url(forResource: "CarfoMenuBarIcon", withExtension: "png"),
            let img = NSImage(contentsOf: url) {
             img.size = size
             img.isTemplate = true

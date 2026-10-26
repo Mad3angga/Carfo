@@ -42,6 +42,8 @@ Siapkan sertifikat dan profil keychain `notarytool` di mesin rilis. Semua Mach-O
 
 Mesin pengembangan saat implementasi tidak memiliki identitas codesigning yang valid. Build ad hoc yang lolos verifikasi lokal belum membuktikan kelulusan Developer ID, notarization, atau instalasi di Mac bersih.
 
+Packaging juga menjalankan `scripts/smoke-startup.py` pada app yang sudah ditandatangani. Uji ini memblokir pembacaan folder `.build`, memakai direktori data sementara, menunggu panel pencarian dan indeks siap, lalu memastikan signature tetap valid setelah startup. Jalankan build dari sesi desktop macOS aktif. Resource app dibaca dari `Contents/Resources`; `Bundle.module` hanya digunakan saat menjalankan executable SwiftPM.
+
 `DMG_COMPRESSION_LEVEL` menerima nilai 1–9, default 6. Gunakan level 1 untuk verifikasi lokal yang lebih cepat; pengaturan ini memengaruhi ukuran/waktu kompresi dan tidak mengubah isi aplikasi.
 
 ## Pengujian

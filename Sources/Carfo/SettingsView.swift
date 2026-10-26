@@ -5,7 +5,7 @@ import SwiftUI
 struct CarfoAppLogo: View {
     var size: CGFloat = 36
     private var image: NSImage? {
-        if let url = Bundle.module.url(forResource: "CarfoIcon", withExtension: "png"),
+        if let url = AppResources.bundle.url(forResource: "CarfoIcon", withExtension: "png"),
            let img = NSImage(contentsOf: url) {
             return img
         }
