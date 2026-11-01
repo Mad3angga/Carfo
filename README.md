@@ -6,8 +6,6 @@ Carfo adalah aplikasi menu bar macOS untuk menemukan footage dari deskripsi adeg
 
 Carfo memproses media secara lokal di Mac dan dapat digunakan secara offline. Komponen pemrosesan sudah disertakan dalam aplikasi, sehingga Anda cukup menginstal aplikasi dan menambahkan folder koleksi.
 
-Repositori ini digunakan untuk membagikan aplikasi Carfo dalam format DMG. Source code tidak disertakan.
-
 ## Mode pencarian
 
 | Mode | Media yang dicari | Contoh kueri |
@@ -103,3 +101,7 @@ Hasil pencarian berdasarkan kemiripan isi bukan jaminan kecocokan. Kualitas tran
 ## Melaporkan masalah
 
 Saat melaporkan masalah, sertakan versi Carfo, versi macOS, jenis chip Mac, langkah untuk mengulangi masalah, dan pesan error yang muncul. Jika terkait media tertentu, sertakan format file serta contoh yang boleh dibagikan.
+
+## Lisensi
+
+Proyek ini dilisensikan di bawah [GNU General Public License v3.0](LICENSE).
