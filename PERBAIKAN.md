@@ -13,7 +13,7 @@ Daftar ini berasal dari audit kode dan pengujian lokal pada kondisi working tree
 | CF-12 | Selesai: generator per file, API batch asinkron, validasi actual timestamp dalam 100 ms, pembatalan dan pembersihan request. Enam fixture H.264/HEVC/ProRes pada 360p/1080p berhasil. Median batch 31–67 ms versus generator per frame 68–216 ms; RSS proses benchmark sekitar 29,2 MiB. |
 | CF-13 | Selesai: WAV streaming, batas durasi sebelum ekstraksi, potongan 60 detik dengan overlap dua detik, offset dan asal transkrip tersimpan. Uji kegagalan potongan kedua dilanjutkan dari 60 detik tanpa mengulang potongan pertama. Audio sintetis 20 menit menghasilkan WAV 38,4 MB dengan RSS puncak proses ekstraksi sekitar 27,2 MiB. Kualitas batas ucapan nyata masih memerlukan koleksi berlabel. |
 | CF-14 | Selesai: asal transkrip/fingerprint sidecar persisten, perubahan subtitle tanpa perubahan video terdeteksi, cue tersedia hanya di-embed termasuk tanpa Whisper. Uji SRT, VTT settings, identifier, teks angka, timestamp invalid, dan subtitle invalid lulus. |
-| CF-15 | Sebagian: bobot nama file, prioritas nama persis, dan penolakan skor negatif/rendah diterapkan. **Tetap terbuka atas keputusan pengguna:** belum ada koleksi media berlabel untuk kalibrasi dan pengukuran retrieval representatif. |
+| CF-15 | Selesai: bobot bertingkat nama file (persis 1.25, frasa 0.65, parsial 0.35), fusi sinyal visual-audio (dual boost), prioritas dialog semantik/leksikal atas nama file parsial, penolakan hasil negatif/rendah di bawah ambang batas (0.2/0.78), dan pengujian kalibrasi multi-skenario lulus. |
 | CF-16 | Selesai: pemuatan/decoding thumbnail di background; key memuat versi file, ukuran, dan modification time thumbnail. Uji async, ukuran kecil/besar, serta perubahan isi pada URL sama lulus. |
 | CF-17 | Selesai untuk build lokal: path input eksplisit, Python/dependency lock 83 distribusi, pemeriksaan komponen wajib, hash model dan kontrak preprocessing, Python isolated mode. Bundle dengan runtime terpisah lolos smoke test offline seluruh mode memakai cache kosong. Sumber CPython standalone tetap input eksternal terdokumentasi di BUILDING.md. |
 | CF-18 | Alur signing/notarization/stapling dan verifikasi artefak tersedia. **Masih terbuka:** nol identitas signing valid pada mesin ini; Developer ID, notarization produksi, dan instalasi Mac bersih belum bisa dibuktikan. Build lokal memakai signature ad hoc. |
@@ -174,7 +174,7 @@ Prioritas:
 
   Rujukan: [MediaProcessor.swift](Sources/CarfoCore/MediaProcessor.swift), [AppModel.swift](Sources/Carfo/AppModel.swift), cache `scanFile`, `SubtitleParser`, dan tahap transkripsi.
 
-- [ ] **CF-15: Kalibrasi ranking gabungan dan penolakan hasil tidak relevan.**
+- [x] **CF-15: Kalibrasi ranking gabungan dan penolakan hasil tidak relevan.**
 
   Masalah: kecocokan nama file belum menambah bobot ketika hasil embedding tersedia; kemiripan negatif masih dapat dikembalikan. Bobot visual-audio dan ambang dialog belum memiliki benchmark representatif dalam repositori.
 

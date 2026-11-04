@@ -65,8 +65,11 @@ public actor LocalEngine {
     public func embed(frames: [URL]) async throws -> [Float] {
         try vector(await request(["op": "images", "paths": frames.map(\.path)]))
     }
-    public func embed(audio: URL) async throws -> [Float] {
-        try vector(await request(["op": "audio", "path": audio.path]))
+    public func embed(audio: URL, offset: Double? = nil, duration: Double? = nil) async throws -> [Float] {
+        var payload: [String: Any] = ["op": "audio", "path": audio.path]
+        if let offset { payload["offset"] = offset }
+        if let duration { payload["duration"] = duration }
+        return try vector(await request(payload))
     }
     /// Embeds transcript lines as retrieval documents, in batches to keep pipe responses small.
     public func embed(documents: [String]) async throws -> [[Float]] {

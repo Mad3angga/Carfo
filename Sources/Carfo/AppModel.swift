@@ -509,11 +509,12 @@ final class AppModel: ObservableObject {
                 work = nil
                 workTask = nil
                 scheduleSearch()
+                Task { await engine.purge() }
             }
             do {
                 _ = try await engine.verify(); modelVerified = true; modelError = nil
                 library.modelRevision = installation.modelIdentifier
-                for candidate in candidates {
+                for (candidateIndex, candidate) in candidates.enumerated() {
                     guard let clipIndex = clipPositions[candidate.id] else { continue }
                     let frameDecoder = candidate.isVideo ? FrameDecoder(url: candidate.url) : nil
 
@@ -595,54 +596,71 @@ final class AppModel: ObservableObject {
                         }
                         updateClip(at: clipIndex) { $0.indexedAt = Date(); $0.indexError = nil }
                         persistSoon(for: candidate.id)
-                        await engine.purge()
-                        try await Task.sleep(for: .milliseconds(50))
+                        if (candidateIndex + 1) % 25 == 0 { await engine.purge() }
+                        await Task.yield()
                         continue
                     }
 
                     // Audio-only indexing: embed audio segments only
                     if candidate.isAudio {
+                        let temporary = store.directory.appendingPathComponent("Working/\(candidate.id.uuidString)", isDirectory: true)
+                        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+                        defer { try? FileManager.default.removeItem(at: temporary) }
+                        let fullWav = temporary.appendingPathComponent("full_audio.wav")
+                        var fullWavExtracted = false
+
                         for segmentIndex in library.clips[clipIndex].segments.indices {
                             try Task.checkCancellation()
                             var segment = library.clips[clipIndex].segments[segmentIndex]
                             if segment.audioEmbedding != nil { continue }
                             work?.detail = "\(candidate.name) · \(timecode(segment.start))–\(timecode(segment.end))"
-                            let temporary = store.directory.appendingPathComponent("Working/\(UUID().uuidString)", isDirectory: true)
-                            try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-                            defer { try? FileManager.default.removeItem(at: temporary) }
-                            let wav = temporary.appendingPathComponent("audio.wav")
-                            try await MediaProcessor.audio(url: candidate.url, segment: segment, destination: wav)
-                            segment.audioEmbedding = try await engine.embed(audio: wav)
+                            if !fullWavExtracted {
+                                try await MediaProcessor.audio(url: candidate.url, segment: VideoSegment(start: 0, end: candidate.duration), destination: fullWav)
+                                fullWavExtracted = true
+                            }
+                            segment.audioEmbedding = try await engine.embed(audio: fullWav, offset: segment.start, duration: segment.end - segment.start)
                             updateClip(at: clipIndex) { $0.segments[segmentIndex] = segment }
                             work?.completed += 1
                             persistSoon(for: candidate.id)
                         }
                         updateClip(at: clipIndex) { $0.indexedAt = Date(); $0.indexError = nil }
                         persistSoon(for: candidate.id)
-                        await engine.purge()
-                        try await Task.sleep(for: .milliseconds(50))
+                        if (candidateIndex + 1) % 25 == 0 { await engine.purge() }
+                        await Task.yield()
                         continue
                     }
 
                     // Video indexing: embed frames + audio
+                    let temporary = store.directory.appendingPathComponent("Working/\(candidate.id.uuidString)", isDirectory: true)
+                    try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+                    defer { try? FileManager.default.removeItem(at: temporary) }
+                    let fullWav = temporary.appendingPathComponent("full_audio.wav")
+                    var fullWavExtracted = false
+
                     for segmentIndex in library.clips[clipIndex].segments.indices {
                         try Task.checkCancellation()
                         var segment = library.clips[clipIndex].segments[segmentIndex]
                         if segment.visualEmbedding != nil && (!candidate.hasAudio || segment.audioEmbedding != nil) { continue }
                         work?.detail = "\(candidate.name) · \(timecode(segment.start))–\(timecode(segment.end))"
-                        let temporary = store.directory.appendingPathComponent("Working/\(UUID().uuidString)", isDirectory: true)
-                        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-                        defer { try? FileManager.default.removeItem(at: temporary) }
                         if segment.visualEmbedding == nil {
                             let frames = try await MediaProcessor.frames(url: candidate.url, segment: segment, directory: temporary, decoder: frameDecoder)
                             segment.visualEmbedding = try await engine.embed(frames: frames)
                             updateClip(at: clipIndex) { $0.segments[segmentIndex] = segment }
                             persistSoon(for: candidate.id)
+                            for frame in frames { try? FileManager.default.removeItem(at: frame) }
                         }
                         if candidate.hasAudio && segment.audioEmbedding == nil {
-                            let wav = temporary.appendingPathComponent("audio.wav")
-                            try await MediaProcessor.audio(url: candidate.url, segment: segment, destination: wav)
-                            segment.audioEmbedding = try await engine.embed(audio: wav)
+                            if !fullWavExtracted {
+                                do {
+                                    try await MediaProcessor.audio(url: candidate.url, segment: VideoSegment(start: 0, end: candidate.duration), destination: fullWav)
+                                    fullWavExtracted = true
+                                } catch {
+                                    fullWavExtracted = false
+                                }
+                            }
+                            if fullWavExtracted {
+                                segment.audioEmbedding = try await engine.embed(audio: fullWav, offset: segment.start, duration: segment.end - segment.start)
+                            }
                         }
                         updateClip(at: clipIndex) { $0.segments[segmentIndex] = segment }
                         work?.completed += 1
@@ -650,8 +668,8 @@ final class AppModel: ObservableObject {
                     }
                     updateClip(at: clipIndex) { $0.indexedAt = Date(); $0.indexError = nil }
                     persistSoon(for: candidate.id)
-                    await engine.purge()
-                    try await Task.sleep(for: .milliseconds(60))
+                    if (candidateIndex + 1) % 25 == 0 { await engine.purge() }
+                    await Task.yield()
                 }
             } catch is CancellationError { notice = "Pengindeksan dihentikan. Segmen yang sudah selesai tetap tersimpan." }
             catch {
@@ -810,7 +828,9 @@ final class AppModel: ObservableObject {
         }
         if FileManager.default.fileExists(atPath: result.clip.path) {
             let item = AVPlayerItem(url: result.clip.url)
-            if let segment = result.segment { item.forwardPlaybackEndTime = CMTime(seconds: segment.end, preferredTimescale: 600) }
+            let rawEnd = result.matchedCue != nil ? (result.contextCues.last?.end ?? (result.matchedCue!.end + 1.0)) : (result.segment?.end ?? result.clip.duration)
+            let playbackEnd = min(result.clip.duration, rawEnd)
+            item.forwardPlaybackEndTime = CMTime(seconds: playbackEnd, preferredTimescale: 600)
             player.replaceCurrentItem(with: item)
             let seekTime = result.matchedCue?.start ?? result.segment?.start ?? 0
             player.seek(to: CMTime(seconds: seekTime, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
@@ -828,7 +848,8 @@ final class AppModel: ObservableObject {
         if isPlaying { stopPreview() }
         else {
             let start = result.matchedCue?.start ?? result.segment?.start ?? 0
-            let end = result.matchedCue?.end ?? result.segment?.end ?? result.clip.duration
+            let rawEnd = result.matchedCue != nil ? (result.contextCues.last?.end ?? (result.matchedCue!.end + 1.0)) : (result.segment?.end ?? result.clip.duration)
+            let end = min(result.clip.duration, rawEnd)
             if player.currentTime().seconds >= end - 0.1 || player.currentTime().seconds < start - 0.5 {
                 player.seek(to: CMTime(seconds: start, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
             }

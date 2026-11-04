@@ -120,8 +120,16 @@ public enum SearchEngine {
 
                 for clip in candidates where !matchedClipIDs.contains(clip.id) {
                     let filename = normalized(clip.name + " " + clip.relativePath)
-                    if tokens.allSatisfy({ filename.contains($0) }) {
+                    let filenameWords = filename.split(separator: " ").map(String.init)
+                    let exactName = normalized(clip.url.deletingPathExtension().lastPathComponent) == tokens.joined(separator: " ")
+                    let phraseInName = tokens.count > 1 && containsExactPhrase(text: filename, phrase: tokens.joined(separator: " "))
+                    let filenameMatch = tokens.allSatisfy({ tokenMatches(words: filenameWords, rawText: filename, token: $0) })
+                    if exactName {
                         dialogueResults.append(SearchResult(clip: clip, score: 1.25))
+                    } else if phraseInName {
+                        dialogueResults.append(SearchResult(clip: clip, score: 0.85))
+                    } else if filenameMatch {
+                        dialogueResults.append(SearchResult(clip: clip, score: 0.70))
                     } else if let audioQuery {
                         // Hybrid fallback: check untranscribed clips or clips with no dialogue matches using audio embedding
                         var bestSegment: VideoSegment?
@@ -150,7 +158,8 @@ public enum SearchEngine {
                 guard !tokens.isEmpty else { return Array(samples.prefix(limit)) }
                 return samples.filter { item in
                     let cueNorm = normalized(item.matchedCue?.text ?? "")
-                    return tokens.contains { cueNorm.contains($0) }
+                    let cueWords = cueNorm.split(separator: " ").map(String.init)
+                    return tokens.contains { tokenMatches(words: cueWords, rawText: cueNorm, token: $0) }
                 }
             }
             // Footage exists but nothing is transcribed yet: fall back to approximate audio-vector search below using effectiveVector.
@@ -163,9 +172,11 @@ public enum SearchEngine {
 
         let evaluateCandidate: @Sendable (FootageClip) -> SearchResult? = { clip in
             let filename = normalized(clip.name + " " + clip.relativePath)
-            let filenameMatch = tokens.allSatisfy { filename.contains($0) }
+            let filenameWords = filename.split(separator: " ").map(String.init)
+            let filenameMatch = tokens.allSatisfy { tokenMatches(words: filenameWords, rawText: filename, token: $0) }
             let exactName = normalized(clip.url.deletingPathExtension().lastPathComponent) == tokens.joined(separator: " ")
-            let filenameScore: Float = exactName ? 1.25 : filenameMatch ? 0.35 : 0
+            let phraseInName = tokens.count > 1 && containsExactPhrase(text: filename, phrase: tokens.joined(separator: " "))
+            let filenameScore: Float = exactName ? 1.25 : phraseInName ? 0.65 : filenameMatch ? 0.35 : 0
             var best: SearchResult?
             if let activeVector = effectiveVector {
                 for segment in clip.segments {
@@ -230,6 +241,20 @@ public enum SearchEngine {
             .components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }.joined(separator: " ")
     }
 
+    /// Checks if a sequence of words matches a query token using exact word matching, prefix matching (>= 3 chars), or numeric matching.
+    public static func tokenMatches(words: [String], rawText: String, token: String) -> Bool {
+        if words.contains(token) { return true }
+        if token.count >= 3 && words.contains(where: { $0.hasPrefix(token) }) { return true }
+        if token.contains(where: \.isNumber) && rawText.contains(token) { return true }
+        return false
+    }
+
+    /// Checks if a text matches an exact multi-word phrase with word boundaries.
+    public static func containsExactPhrase(text: String, phrase: String) -> Bool {
+        guard !phrase.isEmpty else { return false }
+        return text == phrase || text.hasPrefix(phrase + " ") || text.hasSuffix(" " + phrase) || text.contains(" " + phrase + " ")
+    }
+
     /// Scores every transcript line: exact phrase > all words > most words, plus meaning similarity.
     static func dialogueMatches(in clips: [FootageClip], tokens: [String], textEmbedding: [Float]?, prenormalizedQuery: [Float]? = nil) -> [SearchResult] {
         let phrase = tokens.joined(separator: " ")
@@ -237,17 +262,22 @@ public enum SearchEngine {
         var results: [SearchResult] = []
         for clip in clips {
             let cues = clip.transcripts.sorted { $0.start < $1.start }
+            let filename = normalized(clip.name + " " + clip.relativePath)
+            let filenameWords = filename.split(separator: " ").map(String.init)
+            let exactName = normalized(clip.url.deletingPathExtension().lastPathComponent) == phrase
+            let phraseInName = tokens.count > 1 && containsExactPhrase(text: filename, phrase: phrase)
+            let filenameBoost: Float = exactName ? 0.70 : phraseInName ? 0.50 : tokens.allSatisfy { tokenMatches(words: filenameWords, rawText: filename, token: $0) } ? 0.35 : 0
             for (index, cue) in cues.enumerated() {
                 let text = normalized(cue.text)
-                let matched = tokens.filter { text.contains($0) }.count
+                let cueWords = text.split(separator: " ").map(String.init)
+                let matched = tokens.filter { tokenMatches(words: cueWords, rawText: text, token: $0) }.count
                 let fraction = Float(matched) / Float(tokens.count)
-                let lexical: Float = text.contains(phrase) ? 1.0 : matched == tokens.count ? 0.8 : fraction >= 0.5 ? 0.5 * fraction : 0
+                let isPhrase = containsExactPhrase(text: text, phrase: phrase)
+                let lexical: Float = isPhrase ? 1.0 : matched == tokens.count ? 0.8 : fraction >= 0.5 ? 0.5 * fraction : 0
                 let similarity = queryVector.flatMap { q in cue.embedding.flatMap { VectorMath.similarity(normalizedQuery: q, candidate: $0) } }
                 let semantic = similarity.map { $0 >= dialogueSemanticFloor } ?? false
                 guard lexical > 0 || semantic else { continue }
                 let context = [index > 0 ? cues[index - 1] : nil, cue, index + 1 < cues.count ? cues[index + 1] : nil].compactMap { $0 }
-                let filename = normalized(clip.name + " " + clip.relativePath)
-                let filenameBoost: Float = tokens.allSatisfy { filename.contains($0) } ? 0.35 : 0
                 results.append(SearchResult(clip: clip, segment: VideoSegment(start: cue.start, end: cue.end), score: lexical + max(0, similarity ?? 0) + filenameBoost, matchedCue: cue, contextCues: context))
             }
         }

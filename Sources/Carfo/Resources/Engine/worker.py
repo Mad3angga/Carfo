@@ -85,6 +85,7 @@ class EmbeddingEngine:
         self.model: Any = None
         self.processor: Any = None
         self.mx: Any = None
+        self.op_count = 0
 
     def load(self):
         if self.model is not None:
@@ -105,6 +106,11 @@ class EmbeddingEngine:
             except Exception:
                 pass
         import gc; gc.collect()
+
+    def maybe_clear_cache(self, interval: int = 30):
+        self.op_count += 1
+        if self.op_count % interval == 0:
+            self.clear_cache()
 
     def encode(self, request: dict[str, Any]) -> dict[str, Any]:
         self.load()
@@ -127,12 +133,13 @@ class EmbeddingEngine:
                 del inputs, result, vector, norm
             except Exception:
                 embeddings = [self.encode({"op": "text", "text": text})["embedding"] for text in texts]
-            self.clear_cache()
+            self.maybe_clear_cache(interval=10)
             return {"embeddings": embeddings, "dimensions": 768}
         if op == "verify":
             return {"backend": "MLX · Apple Silicon", "model": "EmbeddingGemma 2", "dimensions": 768}
         if op == "purge":
             self.clear_cache()
+            self.op_count = 0
             return {"purged": True}
         if op == "text":
             text = request.get("text", "").strip()
@@ -156,7 +163,10 @@ class EmbeddingEngine:
             inputs = {**media, **text}
             del frames
         elif op == "audio":
-            samples = read_pcm16_wav(request["path"], max_seconds=30)
+            offset = float(request.get("offset", 0.0))
+            duration = request.get("duration")
+            duration_sec = float(duration) if duration is not None else 30.0
+            samples = read_pcm16_wav(request["path"], max_seconds=30, offset_seconds=offset, duration_seconds=duration_sec)
             media = self.processor.feature_extractor([samples], sampling_rate=16000, return_tensors="np", padding=True)
             prompt = self.processor.replace_audio_token(media, 0)
             text = self.processor.tokenizer([prompt], return_tensors="np", padding=True)
@@ -178,7 +188,7 @@ class EmbeddingEngine:
         self.mx.eval(vector)
         out = vector.tolist()
         del inputs, result, vector, norm
-        self.clear_cache()
+        self.maybe_clear_cache()
         return {"embedding": out, "dimensions": 768}
 
 

@@ -283,7 +283,7 @@ public enum LibraryScanner {
     }
 
     public static func scan(folder: FootageFolder, previous: [FootageClip], thumbnails: URL, progress: (@Sendable (ScanProgress) async -> Void)? = nil) async throws -> ScanReport {
-        let root = URL(fileURLWithPath: folder.path)
+        let root = URL(fileURLWithPath: folder.path).standardized.resolvingSymlinksInPath()
         guard FileManager.default.isReadableFile(atPath: root.path) else { throw CocoaError(.fileReadNoPermission) }
         var errors: [String] = []
         guard let iterator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey], options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { url, error in
@@ -291,6 +291,14 @@ public enum LibraryScanner {
             return true
         }) else { throw CocoaError(.fileReadNoPermission) }
         let old = Dictionary(previous.filter { $0.folderID == folder.id }.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+        var signatures: [String: [FootageClip]] = [:]
+        for clip in previous.filter({ $0.folderID == folder.id }) {
+            if clip.fileSize > 0 {
+                let sig = "\(clip.fileSize):\(Int64(clip.modifiedAt.timeIntervalSince1970))"
+                signatures[sig, default: []].append(clip)
+            }
+        }
+        var claimedIDs = Set<UUID>()
         var files: [URL] = []
         while let url = iterator.nextObject() as? URL {
             try Task.checkCancellation()
@@ -303,7 +311,7 @@ public enum LibraryScanner {
         for (index, url) in files.enumerated() {
             try Task.checkCancellation()
             do {
-                if let clip = try await scanFile(url: url, folder: folder, root: root, old: old, thumbnails: thumbnails) {
+                if let clip = try await scanFile(url: url, folder: folder, root: root, old: old, signatures: &signatures, claimedIDs: &claimedIDs, thumbnails: thumbnails) {
                     clips.append(clip)
                     if let error = clip.transcriptError { errors.append("\(clip.name): \(error)") }
                 }
@@ -317,24 +325,51 @@ public enum LibraryScanner {
         return ScanReport(clips: clips, errors: errors)
     }
 
-    private static func scanFile(url: URL, folder: FootageFolder, root: URL, old: [String: FootageClip], thumbnails: URL) async throws -> FootageClip? {
+    private static func scanFile(url: URL, folder: FootageFolder, root: URL, old: [String: FootageClip], signatures: inout [String: [FootageClip]], claimedIDs: inout Set<UUID>, thumbnails: URL) async throws -> FootageClip? {
         let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey])
         guard values.isRegularFile == true, values.isSymbolicLink != true else { return nil }
         let size = Int64(values.fileSize ?? 0)
         let date = values.contentModificationDate ?? .distantPast
         let fileMediaType = MediaType.from(extension: url.pathExtension)
+        let standardizedURL = url.standardized.resolvingSymlinksInPath()
+        let relativePath: String
+        if standardizedURL.path.hasPrefix(root.path + "/") {
+            relativePath = String(standardizedURL.path.dropFirst(root.path.count + 1))
+        } else if url.path.hasPrefix(folder.path + "/") {
+            relativePath = String(url.path.dropFirst(folder.path.count + 1))
+        } else {
+            relativePath = url.lastPathComponent
+        }
 
-        if var cached = old[url.path], cached.fileSize == size, cached.modifiedAt == date {
+        var matchedClip: FootageClip?
+        if let exact = old[url.path] ?? old[standardizedURL.path], exact.fileSize == size, exact.modifiedAt == date {
+            matchedClip = exact
+            claimedIDs.insert(exact.id)
+        } else if size > 0 {
+            let sig = "\(size):\(Int64(date.timeIntervalSince1970))"
+            if let candidates = signatures[sig], let index = candidates.firstIndex(where: { !claimedIDs.contains($0.id) }) {
+                var candidate = candidates[index]
+                signatures[sig]?.remove(at: index)
+                claimedIDs.insert(candidate.id)
+                candidate.path = standardizedURL.path
+                candidate.relativePath = relativePath
+                matchedClip = candidate
+            }
+        }
+
+        if var cached = matchedClip {
             cached.mediaType = fileMediaType
+            cached.path = standardizedURL.path
+            cached.relativePath = relativePath
             if cached.thumbnail == nil && fileMediaType != .audio {
                 cached.thumbnail = "\(cached.id.uuidString).jpg"
             }
             if let name = cached.thumbnail, !FileManager.default.fileExists(atPath: thumbnails.appendingPathComponent(name).path) {
                 switch fileMediaType {
                 case .image:
-                    try imageThumbnail(url: url, destination: thumbnails.appendingPathComponent(name))
+                    try imageThumbnail(url: standardizedURL, destination: thumbnails.appendingPathComponent(name))
                 case .video:
-                    try await MediaProcessor.frame(url: url, at: min(1, cached.duration / 2), destination: thumbnails.appendingPathComponent(name))
+                    try await MediaProcessor.frame(url: standardizedURL, at: min(1, cached.duration / 2), destination: thumbnails.appendingPathComponent(name))
                 case .audio:
                     break // Audio files have no visual thumbnail
                 }
@@ -344,18 +379,17 @@ public enum LibraryScanner {
             return cached
         }
 
-        let id = old[url.path]?.id ?? UUID()
+        let id = old[url.path]?.id ?? old[standardizedURL.path]?.id ?? UUID()
         let thumbnail = fileMediaType == .audio ? nil : "\(id.uuidString).jpg"
-        let relativePath = String(url.path.dropFirst(root.path.count + 1))
 
         switch fileMediaType {
         case .image:
-            let dims = try imageMetadata(url: url)
+            let dims = try imageMetadata(url: standardizedURL)
             if let thumbnail {
-                try imageThumbnail(url: url, destination: thumbnails.appendingPathComponent(thumbnail))
+                try imageThumbnail(url: standardizedURL, destination: thumbnails.appendingPathComponent(thumbnail))
             }
             return FootageClip(
-                id: id, folderID: folder.id, path: url.path,
+                id: id, folderID: folder.id, path: standardizedURL.path,
                 relativePath: relativePath,
                 fileSize: size, modifiedAt: date, duration: 0,
                 width: dims.width, height: dims.height, frameRate: 0, hasAudio: false,
@@ -365,9 +399,9 @@ public enum LibraryScanner {
             )
 
         case .audio:
-            let meta = try await audioMetadata(url: url)
+            let meta = try await audioMetadata(url: standardizedURL)
             var clip = FootageClip(
-                id: id, folderID: folder.id, path: url.path,
+                id: id, folderID: folder.id, path: standardizedURL.path,
                 relativePath: relativePath,
                 fileSize: size, modifiedAt: date, duration: meta.duration,
                 width: 0, height: 0, frameRate: 0, hasAudio: true,
@@ -379,12 +413,12 @@ public enum LibraryScanner {
             return clip
 
         case .video:
-            let metadata = try await MediaProcessor.metadata(url: url)
+            let metadata = try await MediaProcessor.metadata(url: standardizedURL)
             if let thumbnail {
-                try await MediaProcessor.frame(url: url, at: min(1, metadata.duration / 2), destination: thumbnails.appendingPathComponent(thumbnail))
+                try await MediaProcessor.frame(url: standardizedURL, at: min(1, metadata.duration / 2), destination: thumbnails.appendingPathComponent(thumbnail))
             }
             var clip = FootageClip(
-                id: id, folderID: folder.id, path: url.path,
+                id: id, folderID: folder.id, path: standardizedURL.path,
                 relativePath: relativePath,
                 fileSize: size, modifiedAt: date, duration: metadata.duration,
                 width: metadata.width, height: metadata.height, frameRate: metadata.frameRate,

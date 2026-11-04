@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.0.2 · 4 November 2026 · Optimasi pipeline dan akurasi indexing
+
+- Audio klip diekstrak sekali ke berkas WAV master per klip. Pembacaan segmen dan transkripsi berikutnya melakukan seek langsung melalui parameter offset dan durasi tanpa membuka ulang decoder berkali-kali.
+- Loop indexing mengganti jeda sleep buatan dengan yield kooperatif agar antarmuka tetap responsif tanpa membuang waktu komputasi.
+- Pembersihan memori Metal dan garbage collection diatur periodik setiap 30 segmen atau saat sesi indexing selesai, tidak lagi dipanggil di setiap segmen individu.
+- Satu direktori kerja sementara digunakan bersama per klip, mengurangi pembuatan dan penghapusan folder berulang di disk.
+- Skor leksikal membedakan nama file persis, frasa berurutan di dalam nama, dan kecocokan kata terpisah secara bertingkat.
+- Pencarian nama file memakai batas kata dan pencocokan awalan minimal 3 karakter untuk mencegah salah cocok pada kata pendek seperti "di", "ke", atau "cat".
+- Hasil dialog dengan kemiripan semantik tinggi diutamakan di atas kecocokan nama file parsial pada klip yang belum ditranskrip.
+- Ambang batas semantik diperketat agar skor negatif dan hasil tidak relevan disaring dari daftar pencarian.
+- Pemutaran preview dialog menyertakan margin audio tambahan 1 detik agar suku kata terakhir tidak terpotong.
+- Pindai folder mendeteksi berkas yang diganti namanya atau dipindahkan ke subfolder melalui ukuran dan tanggal modifikasi fisik, mempertahankan embedding, transkrip, dan thumbnail tanpa indexing ulang.
+- Jalur berkas menormalkan symlink `/var` dan `/private/var` secara konsisten pada macOS.
+- Versi aplikasi menjadi **2.0.2**, build **4**. Seluruh 62 pengujian lokal lulus dengan strict concurrency dan warnings-as-errors.
+
 ## 2.0.1 · 26 Oktober 2026 · Perbaikan startup
 
 - Resource pada app terkemas dibaca dari `Contents/Resources`, sehingga startup tidak bergantung pada folder build komputer pengembang.
