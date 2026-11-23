@@ -261,7 +261,8 @@ public enum SearchEngine {
         let queryVector = prenormalizedQuery ?? textEmbedding.flatMap { VectorMath.normalized($0) }
         var results: [SearchResult] = []
         for clip in clips {
-            let cues = clip.transcripts.sorted { $0.start < $1.start }
+            let isSorted = zip(clip.transcripts, clip.transcripts.dropFirst()).allSatisfy { $0.start <= $1.start }
+            let cues = isSorted ? clip.transcripts : clip.transcripts.sorted { $0.start < $1.start }
             let filename = normalized(clip.name + " " + clip.relativePath)
             let filenameWords = filename.split(separator: " ").map(String.init)
             let exactName = normalized(clip.url.deletingPathExtension().lastPathComponent) == phrase

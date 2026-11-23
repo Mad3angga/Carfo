@@ -239,4 +239,58 @@ final class AppModelTests: XCTestCase {
         XCTAssertGreaterThan(color.blueComponent, 0.9)
         XCTAssertLessThan(color.redComponent, 0.1)
     }
+
+    func testOneBrokenClipDoesNotAbortIndexingOfSubsequentValidClips() async throws {
+        let root = try directory(), store = try LibraryStore(directory: root)
+        let validImage = root.appendingPathComponent("valid.png")
+        let context = CGContext(data: nil, width: 64, height: 64, bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 0, green: 1, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
+        let destination = CGImageDestinationCreateWithURL(validImage as CFURL, UTType.png.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+
+        let script = root.appendingPathComponent("clip_isolation_worker.py")
+        try """
+        import sys, json, os
+        for line in sys.stdin:
+            r = json.loads(line)
+            op = r['op']
+            if op == 'images':
+                paths = r.get('paths', [])
+                if not paths or not os.path.exists(paths[0]):
+                    print(json.dumps({'ok': False, 'id': r['id'], 'error': 'file not found'}), flush=True)
+                    continue
+                result = {'embedding': [1.0] + [0.0] * 767}
+            else:
+                result = {'backend': 'test'}
+            print(json.dumps(dict(result, ok=True, id=r['id'])), flush=True)
+        """.write(to: script, atomically: true, encoding: .utf8)
+
+        let installation = LocalModelInstallation(modelDirectory: root, pythonExecutable: URL(fileURLWithPath: "/usr/bin/python3"))
+        var library = LibraryManifest()
+        library.modelRevision = installation.modelIdentifier
+        let folderID = UUID()
+        let brokenClip = FootageClip(folderID: folderID, path: root.appendingPathComponent("missing.png").path, duration: 0,
+                                     segments: [VideoSegment(start: 0, end: 0)], mediaType: .image)
+        let goodClip = FootageClip(folderID: folderID, path: validImage.path, duration: 0,
+                                   segments: [VideoSegment(start: 0, end: 0)], mediaType: .image)
+        library.clips = [brokenClip, goodClip]
+        try store.save(library)
+
+        let app = try model(root, installation: installation, script: script)
+        try await waitUntil { !app.isLoading }
+        app.startIndexing()
+        try await waitUntil { !app.isWorking }
+
+        let updatedBroken = try XCTUnwrap(app.library.clips.first { $0.id == brokenClip.id })
+        let updatedGood = try XCTUnwrap(app.library.clips.first { $0.id == goodClip.id })
+        XCTAssertFalse(updatedBroken.isIndexed)
+        XCTAssertNotNil(updatedBroken.indexError)
+        XCTAssertTrue(updatedGood.isIndexed, "Valid clip after a broken clip must still be indexed")
+        XCTAssertNil(updatedGood.indexError)
+        XCTAssertEqual(app.indexedCount, 1)
+        app.shutdown()
+    }
 }

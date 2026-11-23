@@ -54,6 +54,7 @@ public final class LibraryDatabase: @unchecked Sendable {
             throw DatabaseError.connectionFailed(msg)
         }
         self.db = dbPointer
+        sqlite3_busy_timeout(dbPointer, 5000)
 
         // Configure WAL mode and normal sync for concurrency and speed
         _ = execute("PRAGMA journal_mode = WAL;")
@@ -367,6 +368,7 @@ public final class LibraryDatabase: @unchecked Sendable {
                 sqlite3_finalize(stmt)
             }
             for cid in clipIDs {
+                _ = executeWithID("DELETE FROM clip_state WHERE clip_id = ?;", id: cid)
                 _ = executeWithID("DELETE FROM clip_transcripts WHERE clip_id = ?;", id: cid)
                 _ = executeWithID("DELETE FROM segment_cues WHERE segment_id IN (SELECT id FROM segments WHERE clip_id = ?);", id: cid)
                 _ = executeWithID("DELETE FROM segments WHERE clip_id = ?;", id: cid)
@@ -397,7 +399,11 @@ public final class LibraryDatabase: @unchecked Sendable {
 
                 bindMeta("version", String(manifest.version))
                 bindMeta("model", manifest.model)
-                if let rev = manifest.modelRevision { bindMeta("modelRevision", rev) }
+                if let rev = manifest.modelRevision {
+                    bindMeta("modelRevision", rev)
+                } else {
+                    _ = execute("DELETE FROM metadata WHERE key = 'modelRevision';")
+                }
             }
 
             // 2. Folders
@@ -697,23 +703,36 @@ public final class LibraryDatabase: @unchecked Sendable {
 
         sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_FULL, nil, nil)
 
+        let tempDestination = destination.appendingPathExtension("tmp")
+        try? FileManager.default.removeItem(at: tempDestination)
+
         var destDb: OpaquePointer?
-        if sqlite3_open_v2(destination.path, &destDb, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) != SQLITE_OK {
+        if sqlite3_open_v2(tempDestination.path, &destDb, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) != SQLITE_OK {
             let msg = destDb != nil ? String(cString: sqlite3_errmsg(destDb)) : "Unknown"
             if let destDb { sqlite3_close(destDb) }
+            try? FileManager.default.removeItem(at: tempDestination)
             throw DatabaseError.executionFailed("Gagal membuka destination backup: \(msg)")
         }
-        defer { sqlite3_close(destDb) }
 
         guard let backup = sqlite3_backup_init(destDb, "main", db, "main") else {
             let msg = String(cString: sqlite3_errmsg(destDb))
+            sqlite3_close(destDb)
+            try? FileManager.default.removeItem(at: tempDestination)
             throw DatabaseError.executionFailed("Gagal inisialisasi backup SQLite: \(msg)")
         }
 
         let step = sqlite3_backup_step(backup, -1)
         sqlite3_backup_finish(backup)
+        sqlite3_close(destDb)
         if step != SQLITE_DONE {
+            try? FileManager.default.removeItem(at: tempDestination)
             throw DatabaseError.executionFailed("Backup SQLite belum selesai sempurna.")
+        }
+
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: tempDestination)
+        } else {
+            try FileManager.default.moveItem(at: tempDestination, to: destination)
         }
     }
 
@@ -728,7 +747,9 @@ public final class LibraryDatabase: @unchecked Sendable {
         defer { sqlite3_finalize(state) }
         sqlite3_bind_text(state, 1, clip.id.uuidString, -1, SQLITE_TRANSIENT)
         if let source = clip.transcriptSource { sqlite3_bind_text(state, 2, source, -1, SQLITE_TRANSIENT) }
+        else { sqlite3_bind_null(state, 2) }
         if let fingerprint = clip.subtitleFingerprint { sqlite3_bind_text(state, 3, fingerprint, -1, SQLITE_TRANSIENT) }
+        else { sqlite3_bind_null(state, 3) }
         sqlite3_bind_double(state, 4, clip.transcriptOffset)
         guard sqlite3_step(state) == SQLITE_DONE else { throw DatabaseError.executionFailed("Gagal menyimpan progres transkripsi") }
 

@@ -345,14 +345,17 @@ final class CarfoCoreTests: XCTestCase {
         manifest.folders = [folder]
         manifest.clips = [FootageClip(folderID: folder.id, path: "/TestFolder/clip.mov", duration: 10)]
         try store.save(manifest)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: store.manifestURL.path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: store.backupURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.databaseURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.databaseBackupURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.manifestURL.path))
 
-        // Corrupt manifest file
-        try Data("corrupted data".utf8).write(to: store.manifestURL)
+        // Corrupt SQLite database file (including stale WAL artifact)
+        store.closeDatabase()
+        try Data("corrupted sqlite data".utf8).write(to: store.databaseURL)
+        try Data("stale wal bytes".utf8).write(to: URL(fileURLWithPath: store.databaseURL.path + "-wal"))
         XCTAssertThrowsError(try store.load())
 
-        // Restore from backup
+        // Restore from backup cleanly removes stale WAL and recovers data
         let restored = try store.restoreBackup()
         XCTAssertEqual(restored.clips.count, 1)
         XCTAssertEqual(restored.clips[0].path, "/TestFolder/clip.mov")
@@ -791,8 +794,9 @@ final class CarfoCoreTests: XCTestCase {
         try store.save(manifest)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.databaseBackupURL.path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: store.backupURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.manifestURL.path))
 
+        store.closeDatabase()
         try Data("garbage sqlite".utf8).write(to: store.databaseURL)
 
         let restored = try store.restoreBackup()
@@ -802,6 +806,113 @@ final class CarfoCoreTests: XCTestCase {
 
         let reloaded = try store.load()
         XCTAssertEqual(reloaded.clips.count, 1)
+    }
+
+    func testSQLiteLoadIgnoresStaleLegacyJSONAndRemoveFolderCleansClipState() throws {
+        let dir = try temporaryDirectory()
+        let store = try LibraryStore(directory: dir)
+        let folder = FootageFolder(path: "/Videos")
+        var clip = FootageClip(folderID: folder.id, path: "/Videos/a.mov", duration: 60, hasAudio: true)
+        clip.transcriptSource = "whisper"
+        clip.transcriptOffset = 30
+        var manifest = LibraryManifest()
+        manifest.folders = [folder]
+        manifest.clips = [clip]
+        try store.save(manifest)
+
+        // Even if an old/corrupt library.json is left around, SQLite load must not read or fail on it
+        try Data("{corrupt legacy json".utf8).write(to: store.manifestURL)
+        let loaded = try store.load()
+        XCTAssertEqual(loaded.clips.count, 1)
+        XCTAssertEqual(loaded.clips[0].transcriptOffset, 30)
+
+        // Removing folder must also clean clip_state rows
+        try store.removeFolder(id: folder.id)
+        let afterRemove = try store.load()
+        XCTAssertTrue(afterRemove.folders.isEmpty)
+        XCTAssertTrue(afterRemove.clips.isEmpty)
+
+        // Re-adding a clip with the same ID must not inherit stale clip_state
+        let freshClip = FootageClip(id: clip.id, folderID: folder.id, path: "/Videos/a.mov", duration: 60, hasAudio: true)
+        try store.saveFolder(folder)
+        try store.saveClip(freshClip)
+        let reloaded = try store.load()
+        XCTAssertEqual(reloaded.clips.first?.transcriptOffset, 0)
+        XCTAssertNil(reloaded.clips.first?.transcriptSource)
+    }
+
+    func testSoftCancelKeepsWorkerWarmAndPriorityQueuePreemptsBackground() async throws {
+        let dir = try temporaryDirectory()
+        let script = dir.appendingPathComponent("priority_worker.py")
+        let source = """
+        import os, sys, json, time
+        order = []
+        for line in sys.stdin:
+            req = json.loads(line)
+            req_id = req.get('id')
+            op = req.get('op')
+            if op == 'slow':
+                time.sleep(0.15)
+            order.append(req.get('tag', op))
+            res = {'ok': True, 'id': req_id, 'pid': os.getpid(), 'order': list(order), 'tag': req.get('tag', op)}
+            print(json.dumps(res), flush=True)
+        """
+        try Data(source.utf8).write(to: script)
+        let installation = LocalModelInstallation(modelDirectory: dir, pythonExecutable: URL(fileURLWithPath: "/usr/bin/python3"))
+        let engine = LocalEngine(installation: installation, script: script, logDirectory: dir)
+
+        // 1. Prime worker and record PID
+        let first = try await engine.request(["op": "ping", "tag": "init"])
+        let initialPID = try XCTUnwrap((first["pid"] as? NSNumber)?.intValue)
+
+        // 2. Soft-cancel an interactive request: must throw CancellationError WITHOUT killing worker
+        let cancelled = Task<Void, Error> {
+            _ = try await engine.request(["op": "slow", "tag": "cancelled"], priority: .interactive, terminateOnCancel: false)
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        cancelled.cancel()
+        _ = try? await cancelled.value
+
+        let afterCancel = try await engine.request(["op": "ping", "tag": "after"], priority: .interactive, terminateOnCancel: false)
+        XCTAssertEqual((afterCancel["pid"] as? NSNumber)?.intValue, initialPID, "Soft cancel must keep the warm worker process alive")
+        XCTAssertEqual(afterCancel["tag"] as? String, "after")
+
+        // 3. Priority queue: interactive request queued behind a running job must execute before queued background job
+        let holder = Task<Void, Error> {
+            _ = try await engine.request(["op": "slow", "tag": "holder"], priority: .background, terminateOnCancel: true)
+        }
+        try await Task.sleep(for: .milliseconds(25))
+        let bg = Task<[String], Error> {
+            let res = try await engine.request(["op": "ping", "tag": "bg"], priority: .background, terminateOnCancel: true)
+            return (res["order"] as? [String]) ?? []
+        }
+        try await Task.sleep(for: .milliseconds(15))
+        let interactive = Task<Int?, Error> {
+            let res = try await engine.request(["op": "ping", "tag": "interactive"], priority: .interactive, terminateOnCancel: false)
+            return (res["pid"] as? NSNumber)?.intValue
+        }
+        _ = try await holder.value
+        let interPID = try await interactive.value
+        let finalOrder = try await bg.value
+        let interIdx = try XCTUnwrap(finalOrder.firstIndex(of: "interactive"))
+        let bgIdx = try XCTUnwrap(finalOrder.firstIndex(of: "bg"))
+        XCTAssertLessThan(interIdx, bgIdx, "Interactive query must preempt queued background indexing request")
+        XCTAssertEqual(interPID, initialPID)
+        await engine.stop()
+    }
+
+    func testSubtitleParserHandlesUTF8BOMAndLongTwoPartVTTMinutes() {
+        let bomSRT = "\u{FEFF}1\r\n00:00:01,500 --> 00:00:03,000\r\nHalo dari BOM"
+        let srtCues = SubtitleParser.parse(text: bomSRT)
+        XCTAssertEqual(srtCues.count, 1)
+        XCTAssertEqual(srtCues[0].start, 1.5, accuracy: 0.001)
+        XCTAssertEqual(srtCues[0].text, "Halo dari BOM")
+
+        let longVTT = "WEBVTT\n\n75:10.500 --> 75:15.000\nLebih dari satu jam"
+        let vttCues = SubtitleParser.parse(text: longVTT)
+        XCTAssertEqual(vttCues.count, 1)
+        XCTAssertEqual(vttCues[0].start, 75 * 60 + 10.5, accuracy: 0.001)
+        XCTAssertEqual(vttCues[0].text, "Lebih dari satu jam")
     }
 }
 

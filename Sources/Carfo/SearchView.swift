@@ -1053,11 +1053,39 @@ final class ThumbnailCache: ObservableObject {
     private let cache = NSCache<NSString, NSImage>()
     @Published private(set) var revision = 0
     private var resolvedKeys: [String: String] = [:]
+    private var resolvedKeyOrder: [String] = []
     private var pending = Set<String>()
+    private var pendingPublishRequests = Set<String>()
+    private var justPublished = Set<String>()
+    private var publishTask: Task<Void, Never>?
 
     init() {
         cache.countLimit = 300
         cache.totalCostLimit = 64 * 1024 * 1024 // 64 MB
+    }
+
+    private func recordResolvedKey(_ key: String, for request: String) {
+        if resolvedKeys[request] == nil {
+            resolvedKeyOrder.append(request)
+        }
+        resolvedKeys[request] = key
+        while resolvedKeyOrder.count > 600 {
+            let evicted = resolvedKeyOrder.removeFirst()
+            resolvedKeys.removeValue(forKey: evicted)
+        }
+    }
+
+    private func schedulePublish(for request: String) {
+        pendingPublishRequests.insert(request)
+        guard publishTask == nil else { return }
+        publishTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(16))
+            guard let self else { return }
+            self.publishTask = nil
+            self.justPublished.formUnion(self.pendingPublishRequests)
+            self.pendingPublishRequests.removeAll()
+            self.revision &+= 1
+        }
     }
 
     func image(for url: URL, targetSize: CGSize? = nil, version: Double = 0) -> NSImage? {
@@ -1066,6 +1094,9 @@ final class ThumbnailCache: ObservableObject {
         let previousKey = resolvedKeys[request]
         let previous = previousKey.flatMap { cache.object(forKey: $0 as NSString) }
         let wasCached = previous != nil
+        if wasCached && justPublished.remove(request) != nil {
+            return previous
+        }
         if pending.insert(request).inserted {
             Task { [weak self] in
                 let loaded = await Task.detached(priority: .utility) {
@@ -1078,12 +1109,11 @@ final class ThumbnailCache: ObservableObject {
                 self.pending.remove(request)
                 if let image = loaded.image {
                     self.cache.setObject(image, forKey: loaded.key as NSString, cost: Int(image.size.width * image.size.height * 4))
-                    self.resolvedKeys[request] = loaded.key
-                    if self.resolvedKeys.count > 600 { self.resolvedKeys = [request: loaded.key] }
-                    self.revision &+= 1
+                    self.recordResolvedKey(loaded.key, for: request)
+                    self.schedulePublish(for: request)
                 } else if loaded.key != previousKey {
                     self.resolvedKeys.removeValue(forKey: request)
-                    if wasCached { self.revision &+= 1 }
+                    if wasCached { self.schedulePublish(for: request) }
                 }
             }
         }

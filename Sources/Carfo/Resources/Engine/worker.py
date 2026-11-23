@@ -100,9 +100,12 @@ class EmbeddingEngine:
             raise RuntimeError("Mesin MLX belum dapat dimuat. Pastikan runtime Python mendukung mlx dan mlx_vlm untuk EmbeddingGemma 2. " + str(error)) from error
 
     def clear_cache(self):
-        if self.mx is not None and hasattr(self.mx, "metal"):
+        if self.mx is not None:
             try:
-                self.mx.metal.clear_cache()
+                if hasattr(self.mx, "clear_cache"):
+                    self.mx.clear_cache()
+                elif hasattr(self.mx, "metal") and hasattr(self.mx.metal, "clear_cache"):
+                    self.mx.metal.clear_cache()
             except Exception:
                 pass
         import gc; gc.collect()
@@ -211,6 +214,7 @@ def main():
                     response = transcriber.transcribe(request)
                 elif request.get("op") == "purge":
                     engine.clear_cache()
+                    engine.op_count = 0
                     response = {"ok": True, "purged": True}
                 else:
                     response = engine.encode(request)

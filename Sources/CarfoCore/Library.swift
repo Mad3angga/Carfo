@@ -256,10 +256,38 @@ public struct LibraryManifest: Codable, Equatable, Sendable {
     public init() {}
 }
 
+private final class DatabaseConnectionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private let url: URL
+    private var cached: LibraryDatabase?
+
+    init(url: URL) {
+        self.url = url
+    }
+
+    func connection() throws -> LibraryDatabase {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached { return cached }
+        let db = try LibraryDatabase(url: url)
+        cached = db
+        return db
+    }
+
+    func close() {
+        lock.lock()
+        defer { lock.unlock() }
+        cached?.close()
+        cached = nil
+    }
+}
+
 public struct LibraryStore: Sendable {
     public let directory: URL
+    private let connectionBox: DatabaseConnectionBox
     public init(directory: URL) throws {
         self.directory = directory
+        self.connectionBox = DatabaseConnectionBox(url: directory.appendingPathComponent("library.sqlite3"))
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: true)
     }
@@ -271,30 +299,35 @@ public struct LibraryStore: Sendable {
     public var backupURL: URL { directory.appendingPathComponent("library.json.backup") }
 
     public func database() throws -> LibraryDatabase {
-        try LibraryDatabase(url: databaseURL)
+        try connectionBox.connection()
+    }
+
+    public func closeDatabase() {
+        connectionBox.close()
+    }
+
+    private func removeSQLiteArtifacts(at url: URL) {
+        let fm = FileManager.default
+        for suffix in ["", "-wal", "-shm"] {
+            let path = url.path + suffix
+            if fm.fileExists(atPath: path) {
+                try? fm.removeItem(atPath: path)
+            }
+        }
     }
 
     public func load() throws -> LibraryManifest {
-        // If manifestURL exists and is non-empty, ensure it's valid JSON (protect against corrupt files)
-        if FileManager.default.fileExists(atPath: manifestURL.path) {
-            let data = try Data(contentsOf: manifestURL)
-            if !data.isEmpty {
-                let manifest = try JSONDecoder().decode(LibraryManifest.self, from: data)
-                guard manifest.version == 1 else { throw LibraryError.unsupportedVersion }
-            }
-        }
-
-        // 1. If SQLite database exists, load from SQLite
+        // 1. If SQLite database exists, load directly from SQLite without reading/parsing legacy JSON
         if FileManager.default.fileExists(atPath: databaseURL.path) {
-            let db = try LibraryDatabase(url: databaseURL)
+            let db = try database()
             guard db.checkIntegrity() else {
-                db.close()
+                connectionBox.close()
                 throw LibraryError.corrupted
             }
             return try db.loadManifest()
         }
 
-        // 2. If SQLite database does not exist, but library.json exists: migrate from JSON to SQLite
+        // 2. If SQLite database does not exist, but legacy library.json exists: validate and migrate to SQLite
         if FileManager.default.fileExists(atPath: manifestURL.path) {
             let data = try Data(contentsOf: manifestURL)
             guard !data.isEmpty else { return LibraryManifest() }
@@ -306,23 +339,25 @@ public struct LibraryStore: Sendable {
 
             // Safe migration via temp database
             let tempURL = directory.appendingPathComponent("library.sqlite3.migration")
-            if FileManager.default.fileExists(atPath: tempURL.path) {
-                try? FileManager.default.removeItem(at: tempURL)
-            }
+            removeSQLiteArtifacts(at: tempURL)
             do {
                 let tempDb = try LibraryDatabase(url: tempURL)
                 try tempDb.saveManifest(manifest)
                 guard tempDb.checkIntegrity() else {
                     tempDb.close()
-                    try? FileManager.default.removeItem(at: tempURL)
+                    removeSQLiteArtifacts(at: tempURL)
                     throw LibraryError.corrupted
                 }
                 tempDb.close()
+                removeSQLiteArtifacts(at: databaseURL)
                 try FileManager.default.moveItem(at: tempURL, to: databaseURL)
-                let db = try LibraryDatabase(url: databaseURL)
+                removeSQLiteArtifacts(at: tempURL)
+                let db = try database()
                 try? db.createBackup(to: databaseBackupURL)
+                // Remove legacy JSON once safely migrated and backed up to backupURL
+                try? FileManager.default.removeItem(at: manifestURL)
             } catch {
-                try? FileManager.default.removeItem(at: tempURL)
+                removeSQLiteArtifacts(at: tempURL)
                 throw error
             }
             return manifest
@@ -332,82 +367,76 @@ public struct LibraryStore: Sendable {
     }
 
     public func save(_ manifest: LibraryManifest) throws {
-        // 1. Persist to SQLite database
-        let db = try LibraryDatabase(url: databaseURL)
+        // Persist solely to SQLite and atomic SQLite backup (eliminates multi-second full JSON rewrites)
+        let db = try database()
         try db.saveManifest(manifest)
         try? db.createBackup(to: databaseBackupURL)
+    }
 
-        // 2. Export / sync JSON and backup for backward compatibility & safety
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(manifest)
-        try data.write(to: manifestURL, options: .atomic)
-        try? data.write(to: backupURL, options: .atomic)
+    /// Refreshes the SQLite backup snapshot without rewriting unchanged records.
+    public func refreshBackup() throws {
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else { return }
+        let db = try database()
+        try db.createBackup(to: databaseBackupURL)
     }
 
     /// Incremental save of a single clip and its segments/cues without rewriting the entire database.
     public func saveClip(_ clip: FootageClip) throws {
-        let db = try LibraryDatabase(url: databaseURL)
+        let db = try database()
         try db.saveClip(clip)
     }
 
     /// Incremental save of multiple dirty clips without rewriting the entire database.
     public func saveClips(_ clips: [FootageClip]) throws {
         guard !clips.isEmpty else { return }
-        let db = try LibraryDatabase(url: databaseURL)
+        let db = try database()
         try db.saveClips(clips)
     }
 
     /// Incremental save of a single segment and its cues.
     public func saveSegment(clipID: UUID, segment: VideoSegment) throws {
-        let db = try LibraryDatabase(url: databaseURL)
+        let db = try database()
         try db.saveSegment(clipID: clipID, segment: segment)
     }
 
     /// Incremental save of a folder.
     public func saveFolder(_ folder: FootageFolder) throws {
-        let db = try LibraryDatabase(url: databaseURL)
+        let db = try database()
         try db.saveFolder(folder)
     }
 
     /// Incremental removal of a folder and its clips.
     public func removeFolder(id: UUID) throws {
-        let db = try LibraryDatabase(url: databaseURL)
+        let db = try database()
         try db.removeFolder(id: id)
     }
 
     /// Incremental removal of a clip.
     public func removeClip(id: UUID) throws {
-        let db = try LibraryDatabase(url: databaseURL)
+        let db = try database()
         try db.removeClip(id: id)
     }
 
     public func restoreBackup() throws -> LibraryManifest {
+        connectionBox.close()
+
         // 1. Attempt restore from SQLite backup if available and intact
         if FileManager.default.fileExists(atPath: databaseBackupURL.path) {
             if let testDb = try? LibraryDatabase(url: databaseBackupURL), testDb.checkIntegrity() {
                 testDb.close()
-                if FileManager.default.fileExists(atPath: databaseURL.path) {
-                    try? FileManager.default.removeItem(at: databaseURL)
-                }
+                removeSQLiteArtifacts(at: databaseURL)
                 try FileManager.default.copyItem(at: databaseBackupURL, to: databaseURL)
-                let db = try LibraryDatabase(url: databaseURL)
-                let manifest = try db.loadManifest()
-                // Synchronize JSON
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.sortedKeys]
-                if let data = try? encoder.encode(manifest) {
-                    try? data.write(to: manifestURL, options: .atomic)
-                }
-                return manifest
+                let db = try database()
+                return try db.loadManifest()
             }
         }
 
-        // 2. Fall back to JSON backup
+        // 2. Fall back to legacy JSON backup
         guard FileManager.default.fileExists(atPath: backupURL.path) else { throw LibraryError.noBackup }
         let data = try Data(contentsOf: backupURL)
         let manifest = try JSONDecoder().decode(LibraryManifest.self, from: data)
         guard manifest.version == 1 else { throw LibraryError.unsupportedVersion }
+        removeSQLiteArtifacts(at: databaseURL)
         try save(manifest)
         return manifest
     }

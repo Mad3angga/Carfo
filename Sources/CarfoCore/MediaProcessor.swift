@@ -105,47 +105,106 @@ public enum MediaProcessor {
     }
 }
 
-/// One generator serves all samples in a segment. A 100 ms tolerance avoids unrelated keyframes.
+/// One generator serves all samples in a segment. A 100 ms tolerance avoids unrelated keyframes,
+/// falling back to exact decoding for VFR/long-GOP/near-EOF frames before giving up.
 public final class FrameDecoder {
+    private let asset: AVURLAsset
     private let generator: AVAssetImageGenerator
+    private static let fastTolerance = 0.101
+    private static let maxFallbackDeviation = 2.0
+
     public init(url: URL) {
-        generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        asset = AVURLAsset(url: url)
+        generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 640, height: 480)
         generator.requestedTimeToleranceBefore = CMTime(seconds: 0.1, preferredTimescale: 600)
         generator.requestedTimeToleranceAfter = generator.requestedTimeToleranceBefore
     }
+    private func makeExactGenerator() -> AVAssetImageGenerator {
+        let exact = AVAssetImageGenerator(asset: asset)
+        exact.appliesPreferredTrackTransform = true
+        exact.maximumSize = CGSize(width: 640, height: 480)
+        exact.requestedTimeToleranceBefore = .zero
+        exact.requestedTimeToleranceAfter = .zero
+        return exact
+    }
+    private func decodeExact(at seconds: Double, destination: URL) async throws {
+        let exact = makeExactGenerator()
+        defer { exact.cancelAllCGImageGeneration() }
+        try await withTaskCancellationHandler {
+            let (image, actual) = try await exact.image(at: CMTime(seconds: seconds, preferredTimescale: 600))
+            try Task.checkCancellation()
+            guard actual.seconds.isFinite, abs(actual.seconds - seconds) <= Self.maxFallbackDeviation else {
+                throw MediaError.exportFailed
+            }
+            try save(image, to: destination)
+        } onCancel: { [exact] in exact.cancelAllCGImageGeneration() }
+    }
     public func write(at seconds: Double, destination: URL) async throws {
         try Task.checkCancellation()
-        defer { generator.cancelAllCGImageGeneration() }
-        try await withTaskCancellationHandler {
-            let (image, actual) = try await generator.image(at: CMTime(seconds: seconds, preferredTimescale: 600))
-            try Task.checkCancellation()
-            guard abs(actual.seconds - seconds) <= 0.101 else { throw MediaError.exportFailed }
-            try save(image, to: destination)
-        } onCancel: { [generator] in generator.cancelAllCGImageGeneration() }
+        var needsExactRetry = false
+        do {
+            defer { generator.cancelAllCGImageGeneration() }
+            try await withTaskCancellationHandler {
+                let (image, actual) = try await generator.image(at: CMTime(seconds: seconds, preferredTimescale: 600))
+                try Task.checkCancellation()
+                if actual.seconds.isFinite && abs(actual.seconds - seconds) <= Self.fastTolerance {
+                    try save(image, to: destination)
+                } else {
+                    needsExactRetry = true
+                }
+            } onCancel: { [generator] in generator.cancelAllCGImageGeneration() }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            needsExactRetry = true
+        }
+        if needsExactRetry {
+            try await decodeExact(at: seconds, destination: destination)
+        }
     }
     public func write(times: [Double], directory: URL) async throws -> [URL] {
         try Task.checkCancellation()
-        defer { generator.cancelAllCGImageGeneration() }
-        return try await withTaskCancellationHandler {
-            let requested = times.map { CMTime(seconds: $0, preferredTimescale: 600) }
-            let destinations = times.indices.map { directory.appendingPathComponent("frame-\($0).jpg") }
-            var completed = Set<Int>()
-            for await result in generator.images(for: requested) {
-                try Task.checkCancellation()
-                switch result {
-                case .success(let time, let image, let actual):
-                    guard abs(time.seconds - actual.seconds) <= 0.101,
-                          let index = requested.firstIndex(of: time) else { throw MediaError.exportFailed }
-                    try save(image, to: destinations[index])
-                    completed.insert(index)
-                case .failure(_, let error): throw error
+        let requested = times.map { CMTime(seconds: $0, preferredTimescale: 600) }
+        let destinations = times.indices.map { directory.appendingPathComponent("frame-\($0).jpg") }
+        var completed = Set<Int>()
+        var retryIndices: [Int] = []
+        do {
+            defer { generator.cancelAllCGImageGeneration() }
+            try await withTaskCancellationHandler {
+                for await result in generator.images(for: requested) {
+                    try Task.checkCancellation()
+                    switch result {
+                    case .success(let time, let image, let actual):
+                        guard let index = requested.indices.first(where: { requested[$0] == time && !completed.contains($0) && !retryIndices.contains($0) }) else {
+                            throw MediaError.exportFailed
+                        }
+                        if actual.seconds.isFinite && abs(time.seconds - actual.seconds) <= Self.fastTolerance {
+                            try save(image, to: destinations[index])
+                            completed.insert(index)
+                        } else {
+                            retryIndices.append(index)
+                        }
+                    case .failure(let time, _):
+                        if let index = requested.indices.first(where: { requested[$0] == time && !completed.contains($0) && !retryIndices.contains($0) }) {
+                            retryIndices.append(index)
+                        } else {
+                            throw MediaError.exportFailed
+                        }
+                    }
                 }
-            }
-            guard completed.count == times.count else { throw MediaError.exportFailed }
-            return destinations
-        } onCancel: { [generator] in generator.cancelAllCGImageGeneration() }
+            } onCancel: { [generator] in generator.cancelAllCGImageGeneration() }
+        } catch is CancellationError {
+            throw CancellationError()
+        }
+        for index in retryIndices {
+            try Task.checkCancellation()
+            try await decodeExact(at: times[index], destination: destinations[index])
+            completed.insert(index)
+        }
+        guard completed.count == times.count else { throw MediaError.exportFailed }
+        return destinations
     }
     private func save(_ image: CGImage, to destination: URL) throws {
         guard let output = CGImageDestinationCreateWithURL(destination as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { throw MediaError.exportFailed }
@@ -342,7 +401,7 @@ public enum LibraryScanner {
         }
 
         var matchedClip: FootageClip?
-        if let exact = old[url.path] ?? old[standardizedURL.path], exact.fileSize == size, exact.modifiedAt == date {
+        if let exact = old[url.path] ?? old[standardizedURL.path], exact.fileSize == size, abs(exact.modifiedAt.timeIntervalSince(date)) < 0.001 {
             matchedClip = exact
             claimedIDs.insert(exact.id)
         } else if size > 0 {
@@ -466,7 +525,8 @@ public enum SubtitleParser {
     }
     public static func parse(text: String) -> [TranscriptCue] {
         var cues: [TranscriptCue] = []
-        let blocks = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n\n")
+        let cleaned = text.hasPrefix("\u{FEFF}") ? String(text.dropFirst()) : text
+        let blocks = cleaned.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n\n")
         for block in blocks {
             let lines = block.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
             guard lines.count >= 2 else { continue }
@@ -490,8 +550,9 @@ public enum SubtitleParser {
         let components = parts.compactMap { Double($0) }
         guard components.count == parts.count, (2...3).contains(parts.count),
               components.allSatisfy({ $0.isFinite && $0 >= 0 }),
-              components.last! < 60, components[components.count - 2] < 60 else { return nil }
+              components.last! < 60 else { return nil }
         if components.count == 3 {
+            guard components[1] < 60 else { return nil }
             return components[0] * 3600 + components[1] * 60 + components[2]
         } else if components.count == 2 {
             return components[0] * 60 + components[1]

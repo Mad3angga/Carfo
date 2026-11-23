@@ -242,25 +242,31 @@ final class AppModel: ObservableObject {
         }
     }
     private var dirtyClipIDs = Set<UUID>()
+    private var needsFullSave = false
     private func updateClip(at index: Int, _ edit: (inout FootageClip) -> Void) {
         mutatingClipIndex = index
         defer { mutatingClipIndex = nil }
         edit(&library.clips[index])
     }
 
-    /// Saves now. If dirtyClipIDs are tracked and fewer than all clips, writes only those clips incrementally.
-    func persist() {
+    /// Saves now. Writes only dirty clips incrementally unless a structural manifest change occurred.
+    func persist(forceFull: Bool = false) {
         guard !loadFailed, !isLoading else { return }
         saveTask?.cancel(); saveTask = nil
         let snapshot = library, store = store
         let positions = clipPositions
         let dirty = dirtyClipIDs
+        let full = forceFull || needsFullSave
         dirtyClipIDs.removeAll()
+        needsFullSave = false
+        guard full || !dirty.isEmpty else { return }
         saveQueue.async { [weak self] in
             do {
-                if !dirty.isEmpty && dirty.count < snapshot.clips.count {
+                if !full && !dirty.isEmpty {
                     let dirtyClips = dirty.compactMap { id in positions[id].map { snapshot.clips[$0] } }
-                    try store.saveClips(dirtyClips)
+                    if !dirtyClips.isEmpty {
+                        try store.saveClips(dirtyClips)
+                    }
                 } else {
                     try store.save(snapshot)
                 }
@@ -275,6 +281,7 @@ final class AppModel: ObservableObject {
     func persistSoon(for clipID: UUID? = nil) {
         guard !loadFailed, !isLoading else { return }
         if let clipID { dirtyClipIDs.insert(clipID) }
+        else { needsFullSave = true }
         guard saveTask == nil else { return }
         saveTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
@@ -285,7 +292,12 @@ final class AppModel: ObservableObject {
     /// Writes any pending changes and waits until they are on disk. Used when quitting.
     func flushSaves() {
         guard !loadFailed, !isLoading else { return }
+        let refreshBackupAfter = !needsFullSave && !dirtyClipIDs.isEmpty
         persist()
+        let store = store
+        if refreshBackupAfter {
+            saveQueue.async { try? store.refreshBackup() }
+        }
         saveQueue.sync {}
     }
     func recoverFromBackup() {
@@ -302,7 +314,8 @@ final class AppModel: ObservableObject {
         loadFailed = false
         library = LibraryManifest()
         stats = LibraryStats(library.clips)
-        persist()
+        needsFullSave = true
+        persist(forceFull: true)
         notice = "Indeks telah disetel ulang."
     }
     func pickFolder() {
@@ -339,7 +352,8 @@ final class AppModel: ObservableObject {
             }
             library.folders.append(newFolder)
         }
-        persist(); scanFolders(autoIndex: true)
+        needsFullSave = true
+        persist(forceFull: true); scanFolders(autoIndex: true)
     }
     func removeFolder(_ folder: CarfoFolder) {
         guard !isWorking else { return }
@@ -349,9 +363,13 @@ final class AppModel: ObservableObject {
         library.folders.removeAll { $0.id == folder.id }
         library.clips.removeAll { $0.folderID == folder.id }
         if folderFilter == folder.id { folderFilter = nil }
-        persist(); scheduleSearch()
+        needsFullSave = true
+        persist(forceFull: true); scheduleSearch()
         let activeThumbnails = Set(library.clips.compactMap(\.thumbnail))
-        store.pruneThumbnails(keeping: activeThumbnails)
+        let store = store
+        saveQueue.async {
+            store.pruneThumbnails(keeping: activeThumbnails)
+        }
     }
     /// - Parameter force: "Pindai ulang". Starts a rescan run over every folder, or resumes the unfinished one.
     ///   Folders the run already finished are skipped. Without `force`, only folders never scanned are read.
@@ -487,7 +505,8 @@ final class AppModel: ObservableObject {
             }
             library.modelRevision = installation.modelIdentifier
             queryCache.removeAll(); queryCacheOrder.removeAll()
-            persist()
+            needsFullSave = true
+            persist(forceFull: true)
         }
         let canTranscribe = installation.canTranscribe
         let candidates = library.clips.filter(needsIndexing)
@@ -506,6 +525,8 @@ final class AppModel: ObservableObject {
         workTask = Task(priority: .utility) {
             defer {
                 persist()
+                let store = store
+                saveQueue.async { try? store.refreshBackup() }
                 work = nil
                 workTask = nil
                 scheduleSearch()
@@ -513,7 +534,14 @@ final class AppModel: ObservableObject {
             }
             do {
                 _ = try await engine.verify(); modelVerified = true; modelError = nil
-                library.modelRevision = installation.modelIdentifier
+                if library.modelRevision != installation.modelIdentifier {
+                    library.modelRevision = installation.modelIdentifier
+                    needsFullSave = true
+                }
+                var consecutiveEngineErrors = 0
+                var clipFailureCount = 0
+                var lastClipFailure: String?
+
                 for (candidateIndex, candidate) in candidates.enumerated() {
                     guard let clipIndex = clipPositions[candidate.id] else { continue }
                     let frameDecoder = candidate.isVideo ? FrameDecoder(url: candidate.url) : nil
@@ -571,105 +599,170 @@ final class AppModel: ObservableObject {
                         work?.completed += 1
                     }
 
-                    // Image indexing: embed the image file directly (or its rendered raster thumbnail for SVG)
-                    if candidate.isImage {
-                        for segmentIndex in library.clips[clipIndex].segments.indices {
-                            try Task.checkCancellation()
-                            var segment = library.clips[clipIndex].segments[segmentIndex]
-                            if segment.visualEmbedding != nil { continue }
-                            work?.detail = "\(candidate.name)"
-                            let frameURL: URL
-                            if candidate.url.pathExtension.lowercased() == "svg" {
-                                let thumbName = candidate.thumbnail ?? "\(candidate.id.uuidString).jpg"
-                                let thumbURL = store.thumbnailDirectory.appendingPathComponent(thumbName)
-                                if !FileManager.default.fileExists(atPath: thumbURL.path) {
-                                    try? LibraryScanner.imageThumbnail(url: candidate.url, destination: thumbURL)
+                    // Media embedding (isolated per clip so one corrupt/missing file never aborts the batch)
+                    let mediaUnitsBefore = Self.indexUnits(library.clips[clipIndex], canTranscribe: false)
+                    var completedMediaUnits = 0
+                    do {
+                        if candidate.isImage {
+                            for segmentIndex in library.clips[clipIndex].segments.indices {
+                                try Task.checkCancellation()
+                                var segment = library.clips[clipIndex].segments[segmentIndex]
+                                if segment.visualEmbedding != nil { continue }
+                                work?.detail = "\(candidate.name)"
+                                let frameURL: URL
+                                if candidate.url.pathExtension.lowercased() == "svg" {
+                                    let thumbName = candidate.thumbnail ?? "\(candidate.id.uuidString).jpg"
+                                    let thumbURL = store.thumbnailDirectory.appendingPathComponent(thumbName)
+                                    if !FileManager.default.fileExists(atPath: thumbURL.path) {
+                                        try? LibraryScanner.imageThumbnail(url: candidate.url, destination: thumbURL)
+                                    }
+                                    frameURL = FileManager.default.fileExists(atPath: thumbURL.path) ? thumbURL : candidate.url
+                                } else {
+                                    frameURL = candidate.url
                                 }
-                                frameURL = FileManager.default.fileExists(atPath: thumbURL.path) ? thumbURL : candidate.url
-                            } else {
-                                frameURL = candidate.url
+                                segment.visualEmbedding = try await engine.embed(frames: [frameURL])
+                                updateClip(at: clipIndex) { $0.segments[segmentIndex] = segment }
+                                work?.completed += 1
+                                completedMediaUnits += 1
+                                persistSoon(for: candidate.id)
                             }
-                            segment.visualEmbedding = try await engine.embed(frames: [frameURL])
-                            updateClip(at: clipIndex) { $0.segments[segmentIndex] = segment }
-                            work?.completed += 1
-                            persistSoon(for: candidate.id)
-                        }
-                        updateClip(at: clipIndex) { $0.indexedAt = Date(); $0.indexError = nil }
-                        persistSoon(for: candidate.id)
-                        if (candidateIndex + 1) % 25 == 0 { await engine.purge() }
-                        await Task.yield()
-                        continue
-                    }
-
-                    // Audio-only indexing: embed audio segments only
-                    if candidate.isAudio {
-                        let temporary = store.directory.appendingPathComponent("Working/\(candidate.id.uuidString)", isDirectory: true)
-                        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-                        defer { try? FileManager.default.removeItem(at: temporary) }
-                        let fullWav = temporary.appendingPathComponent("full_audio.wav")
-                        var fullWavExtracted = false
-
-                        for segmentIndex in library.clips[clipIndex].segments.indices {
-                            try Task.checkCancellation()
-                            var segment = library.clips[clipIndex].segments[segmentIndex]
-                            if segment.audioEmbedding != nil { continue }
-                            work?.detail = "\(candidate.name) · \(timecode(segment.start))–\(timecode(segment.end))"
-                            if !fullWavExtracted {
-                                try await MediaProcessor.audio(url: candidate.url, segment: VideoSegment(start: 0, end: candidate.duration), destination: fullWav)
-                                fullWavExtracted = true
+                            if library.clips[clipIndex].isIndexed {
+                                updateClip(at: clipIndex) { $0.indexedAt = Date(); $0.indexError = nil }
+                                persistSoon(for: candidate.id)
                             }
-                            segment.audioEmbedding = try await engine.embed(audio: fullWav, offset: segment.start, duration: segment.end - segment.start)
-                            updateClip(at: clipIndex) { $0.segments[segmentIndex] = segment }
-                            work?.completed += 1
-                            persistSoon(for: candidate.id)
-                        }
-                        updateClip(at: clipIndex) { $0.indexedAt = Date(); $0.indexError = nil }
-                        persistSoon(for: candidate.id)
-                        if (candidateIndex + 1) % 25 == 0 { await engine.purge() }
-                        await Task.yield()
-                        continue
-                    }
+                        } else if candidate.isAudio {
+                            let temporary = store.directory.appendingPathComponent("Working/\(candidate.id.uuidString)", isDirectory: true)
+                            try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+                            defer { try? FileManager.default.removeItem(at: temporary) }
+                            let fullWav = temporary.appendingPathComponent("full_audio.wav")
+                            var fullWavExtracted = false
+                            let canExtractFullAudio = candidate.duration > 0 && candidate.duration <= TranscriptionPlan.maximumDuration
 
-                    // Video indexing: embed frames + audio
-                    let temporary = store.directory.appendingPathComponent("Working/\(candidate.id.uuidString)", isDirectory: true)
-                    try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-                    defer { try? FileManager.default.removeItem(at: temporary) }
-                    let fullWav = temporary.appendingPathComponent("full_audio.wav")
-                    var fullWavExtracted = false
-
-                    for segmentIndex in library.clips[clipIndex].segments.indices {
-                        try Task.checkCancellation()
-                        var segment = library.clips[clipIndex].segments[segmentIndex]
-                        if segment.visualEmbedding != nil && (!candidate.hasAudio || segment.audioEmbedding != nil) { continue }
-                        work?.detail = "\(candidate.name) · \(timecode(segment.start))–\(timecode(segment.end))"
-                        if segment.visualEmbedding == nil {
-                            let frames = try await MediaProcessor.frames(url: candidate.url, segment: segment, directory: temporary, decoder: frameDecoder)
-                            segment.visualEmbedding = try await engine.embed(frames: frames)
-                            updateClip(at: clipIndex) { $0.segments[segmentIndex] = segment }
-                            persistSoon(for: candidate.id)
-                            for frame in frames { try? FileManager.default.removeItem(at: frame) }
-                        }
-                        if candidate.hasAudio && segment.audioEmbedding == nil {
-                            if !fullWavExtracted {
-                                do {
-                                    try await MediaProcessor.audio(url: candidate.url, segment: VideoSegment(start: 0, end: candidate.duration), destination: fullWav)
-                                    fullWavExtracted = true
-                                } catch {
-                                    fullWavExtracted = false
+                            for segmentIndex in library.clips[clipIndex].segments.indices {
+                                try Task.checkCancellation()
+                                var segment = library.clips[clipIndex].segments[segmentIndex]
+                                if segment.audioEmbedding != nil { continue }
+                                work?.detail = "\(candidate.name) · \(timecode(segment.start))–\(timecode(segment.end))"
+                                if canExtractFullAudio {
+                                    if !fullWavExtracted {
+                                        try await MediaProcessor.audio(url: candidate.url, segment: VideoSegment(start: 0, end: candidate.duration), destination: fullWav)
+                                        fullWavExtracted = true
+                                    }
+                                    segment.audioEmbedding = try await engine.embed(audio: fullWav, offset: segment.start, duration: segment.end - segment.start)
+                                } else {
+                                    let segmentWav = temporary.appendingPathComponent("segment-\(segmentIndex).wav")
+                                    defer { try? FileManager.default.removeItem(at: segmentWav) }
+                                    try await MediaProcessor.audio(url: candidate.url, segment: segment, destination: segmentWav)
+                                    segment.audioEmbedding = try await engine.embed(audio: segmentWav, offset: 0, duration: segment.end - segment.start)
                                 }
+                                updateClip(at: clipIndex) { $0.segments[segmentIndex] = segment }
+                                work?.completed += 1
+                                completedMediaUnits += 1
+                                persistSoon(for: candidate.id)
                             }
-                            if fullWavExtracted {
-                                segment.audioEmbedding = try await engine.embed(audio: fullWav, offset: segment.start, duration: segment.end - segment.start)
+                            if library.clips[clipIndex].isIndexed {
+                                updateClip(at: clipIndex) { $0.indexedAt = Date(); $0.indexError = nil }
+                                persistSoon(for: candidate.id)
                             }
+                        } else {
+                            // Video indexing: embed frames + audio
+                            let temporary = store.directory.appendingPathComponent("Working/\(candidate.id.uuidString)", isDirectory: true)
+                            try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+                            defer { try? FileManager.default.removeItem(at: temporary) }
+                            let fullWav = temporary.appendingPathComponent("full_audio.wav")
+                            var fullWavExtracted = false
+                            var audioExtractionAttempted = false
+                            var audioExtractionError: String?
+                            let canExtractFullAudio = candidate.duration > 0 && candidate.duration <= TranscriptionPlan.maximumDuration
+
+                            for segmentIndex in library.clips[clipIndex].segments.indices {
+                                try Task.checkCancellation()
+                                var segment = library.clips[clipIndex].segments[segmentIndex]
+                                let clipHasAudio = library.clips[clipIndex].hasAudio
+                                if segment.visualEmbedding != nil && (!clipHasAudio || segment.audioEmbedding != nil) { continue }
+                                work?.detail = "\(candidate.name) · \(timecode(segment.start))–\(timecode(segment.end))"
+                                if segment.visualEmbedding == nil {
+                                    let frames = try await MediaProcessor.frames(url: candidate.url, segment: segment, directory: temporary, decoder: frameDecoder)
+                                    segment.visualEmbedding = try await engine.embed(frames: frames)
+                                    updateClip(at: clipIndex) { $0.segments[segmentIndex] = segment }
+                                    persistSoon(for: candidate.id)
+                                    for frame in frames { try? FileManager.default.removeItem(at: frame) }
+                                }
+                                if library.clips[clipIndex].hasAudio && segment.audioEmbedding == nil {
+                                    if canExtractFullAudio {
+                                        if !audioExtractionAttempted {
+                                            audioExtractionAttempted = true
+                                            do {
+                                                try await MediaProcessor.audio(url: candidate.url, segment: VideoSegment(start: 0, end: candidate.duration), destination: fullWav)
+                                                fullWavExtracted = true
+                                            } catch MediaError.noAudio {
+                                                updateClip(at: clipIndex) { $0.hasAudio = false }
+                                                fullWavExtracted = false
+                                            } catch {
+                                                fullWavExtracted = false
+                                                audioExtractionError = error.localizedDescription
+                                            }
+                                        }
+                                        if fullWavExtracted {
+                                            segment.audioEmbedding = try await engine.embed(audio: fullWav, offset: segment.start, duration: segment.end - segment.start)
+                                        }
+                                    } else if audioExtractionError == nil {
+                                        let segmentWav = temporary.appendingPathComponent("segment-\(segmentIndex).wav")
+                                        defer { try? FileManager.default.removeItem(at: segmentWav) }
+                                        do {
+                                            try await MediaProcessor.audio(url: candidate.url, segment: segment, destination: segmentWav)
+                                            segment.audioEmbedding = try await engine.embed(audio: segmentWav, offset: 0, duration: segment.end - segment.start)
+                                        } catch MediaError.noAudio {
+                                            updateClip(at: clipIndex) { $0.hasAudio = false }
+                                        } catch {
+                                            audioExtractionError = error.localizedDescription
+                                        }
+                                    }
+                                }
+                                updateClip(at: clipIndex) { $0.segments[segmentIndex] = segment }
+                                work?.completed += 1
+                                completedMediaUnits += 1
+                                persistSoon(for: candidate.id)
+                            }
+                            if library.clips[clipIndex].isIndexed {
+                                updateClip(at: clipIndex) { $0.indexedAt = Date(); $0.indexError = nil }
+                            } else if let audioExtractionError {
+                                updateClip(at: clipIndex) { $0.indexedAt = nil; $0.indexError = audioExtractionError }
+                                clipFailureCount += 1
+                                lastClipFailure = "\(candidate.name): \(audioExtractionError)"
+                            }
+                            persistSoon(for: candidate.id)
                         }
-                        updateClip(at: clipIndex) { $0.segments[segmentIndex] = segment }
-                        work?.completed += 1
+                        consecutiveEngineErrors = 0
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch EngineError.unavailable {
+                        throw EngineError.unavailable
+                    } catch {
+                        let remainingUnits = max(0, (mediaUnitsBefore.total - mediaUnitsBefore.done) - completedMediaUnits)
+                        work?.completed += remainingUnits
+                        updateClip(at: clipIndex) { $0.indexError = error.localizedDescription }
                         persistSoon(for: candidate.id)
+                        clipFailureCount += 1
+                        lastClipFailure = "\(candidate.name): \(error.localizedDescription)"
+                        if error is EngineError {
+                            consecutiveEngineErrors += 1
+                            if consecutiveEngineErrors >= 3 { throw error }
+                        } else {
+                            consecutiveEngineErrors = 0
+                        }
                     }
-                    updateClip(at: clipIndex) { $0.indexedAt = Date(); $0.indexError = nil }
-                    persistSoon(for: candidate.id)
+
                     if (candidateIndex + 1) % 25 == 0 { await engine.purge() }
                     await Task.yield()
+                }
+
+                if !library.clips.contains(where: needsIndexing) {
+                    rescanSessionStart = nil
+                }
+                if clipFailureCount > 0 {
+                    let detail = lastClipFailure.map { " (\($0))" } ?? ""
+                    notice = "\(clipFailureCount) file tidak dapat diindeks\(detail). File lainnya tetap diproses."
                 }
             } catch is CancellationError { notice = "Pengindeksan dihentikan. Segmen yang sudah selesai tetap tersimpan." }
             catch {
@@ -795,8 +888,10 @@ final class AppModel: ObservableObject {
                 }.value
                 try Task.checkCancellation()
 
-                // Guard against stale search results from an older query (CF-07)
-                guard self.query.trimmingCharacters(in: .whitespacesAndNewlines) == text && self.mode == selectedMode else { return }
+                // Guard against stale search results from an older query, mode, or folder filter (CF-07)
+                guard self.query.trimmingCharacters(in: .whitespacesAndNewlines) == text
+                    && self.mode == selectedMode
+                    && self.folderFilter == filter else { return }
 
                 semanticSearch = embedding != nil || textEmbedding != nil
                 results = matches
@@ -807,7 +902,9 @@ final class AppModel: ObservableObject {
             } catch is CancellationError { return }
             catch {
                 guard !Task.isCancelled else { return }
-                guard self.query.trimmingCharacters(in: .whitespacesAndNewlines) == text && self.mode == selectedMode else { return }
+                guard self.query.trimmingCharacters(in: .whitespacesAndNewlines) == text
+                    && self.mode == selectedMode
+                    && self.folderFilter == filter else { return }
                 isSearching = false
                 semanticSearch = false
                 searchError = error.localizedDescription
@@ -884,7 +981,8 @@ final class AppModel: ObservableObject {
         for (_, url) in accessURLs { url.stopAccessingSecurityScopedResource() }
         accessURLs.removeAll()
         flushSaves()
-        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        playbackObserver?.invalidate(); playbackObserver = nil
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver); self.endObserver = nil }
         Task { await engine.stop() }
     }
 }
