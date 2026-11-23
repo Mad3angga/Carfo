@@ -113,7 +113,7 @@ Semua proses — mulai dari ekstraksi frame, transkripsi percakapan, hingga penc
 
 ## Persyaratan Sistem
 
-- **Chip**: Mac dengan **Apple Silicon** (`M1` / `M2` / `M3` / `M4`).
+- **Chip**: Mac dengan **Apple Silicon** (`M1` / `M2` / `M3` / `M4`/ `M5`).
 - **Sistem Operasi**: **macOS 14.0 (Sonoma)** atau lebih baru.
 - **Penyimpanan**: Ruang kosong untuk aplikasi beserta indeks SQLite dan thumbnail klip (menyesuaikan jumlah koleksi media Anda).
 
