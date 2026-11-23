@@ -10,7 +10,7 @@
   <p>
     <a href="https://github.com/Mad3angga/Carfo/releases/latest"><img src="https://img.shields.io/github/v/release/Mad3angga/Carfo?label=Release&color=0866D8" alt="Latest Release"></a>
     <img src="https://img.shields.io/badge/macOS-14.0%2B-black?logo=apple" alt="macOS 14.0+">
-    <img src="https://img.shields.io/badge/Apple%20Silicon-M1%20%E2%80%93%20M4-orange" alt="Apple Silicon">
+    <img src="https://img.shields.io/badge/Apple%20Silicon-M1%20%E2%80%93%20M5-orange" alt="Apple Silicon">
     <img src="https://img.shields.io/badge/Offline-100%25%20Lokal-2ea043" alt="100% Offline">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL-3.0"></a>
   </p>
