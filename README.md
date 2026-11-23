@@ -49,10 +49,7 @@ Semua proses — mulai dari ekstraksi frame, transkripsi percakapan, hingga penc
 - [Persyaratan Sistem](#persyaratan-sistem)
 - [Instalasi](#instalasi)
 - [Cara Penggunaan](#cara-penggunaan)
-- [Pintasan Keyboard](#pintasan-keyboard)
 - [Arsitektur dan Cara Kerja](#arsitektur-dan-cara-kerja)
-- [Privasi dan Penyimpanan](#privasi-dan-penyimpanan)
-- [Pemecahan Masalah](#pemecahan-masalah)
 - [Kontribusi & Pelaporan Masalah](#kontribusi--pelaporan-masalah)
 - [Lisensi](#lisensi)
 
@@ -168,21 +165,6 @@ Untuk panduan lengkap merakit bundle mandiri `Carfo.app` beserta runtime Python 
 
 ---
 
-## Pintasan Keyboard
-
-| Pintasan | Tindakan |
-| --- | --- |
-| `⌥Spasi` | Buka atau tutup panel pencarian dari aplikasi mana pun *(bisa diganti ke `⌃⌥Spasi` atau `⌃Spasi`)* |
-| `↑` / `↓` | Pindah ke hasil pencarian sebelumnya atau berikutnya |
-| `⌃P` | Putar atau jeda preview video/audio pada timestamp yang cocok |
-| `Return` | Buka file asli dengan aplikasi default macOS |
-| `⌘Return` | Tampilkan lokasi file di Finder |
-| `Escape` | Hapus teks pencarian; tekan lagi saat kosong untuk menutup panel |
-| `⌘,` | Buka jendela Pengaturan |
-| `⌘Q` | Keluar dari Carfo |
-
----
-
 ## Arsitektur dan Cara Kerja
 
 Carfo memadukan antarmuka macOS native dengan mesin inferensi lokal berakselerasi Apple Silicon:
@@ -199,29 +181,6 @@ Sources/
 ├── CarfoCore/          # Core engine (LibraryDatabase SQLite, MediaProcessor, SearchEngine, LocalEngine)
 └── CarfoBenchmark/     # Utilitas benchmark indeks, media, dan audio
 ```
-
----
-
-## Privasi dan Penyimpanan
-
-- **100% Lokal & Privat**: Tidak ada koneksi ke internet, server eksternal, atau telemetri. Semua file media, transkrip, dan vektor tetap berada di Mac Anda.
-- **Lokasi Data Aplikasi**: Indeks SQLite, cadangan indeks, thumbnail, dan log tersimpan di:
-  ```text
-  ~/Library/Application Support/Carfo/
-  ```
-- **File Asli Tetap Aman**: Carfo hanya membaca folder koleksi Anda dan tidak pernah memindahkan, mengubah, atau menghapus file fisik. Mengeluarkan folder dari Pengaturan hanya menghapus indeksnya di Carfo.
-
----
-
-## Pemecahan Masalah
-
-| Kondisi | Penyebab & Solusi |
-| --- | --- |
-| **Baru nama file yang muncul di hasil** | Pengindeksan isi visual/audio masih berjalan di latar belakang. Tunggu hingga selesai atau klik **Pindai ulang** jika sempat dijeda. |
-| **Mode Dialog belum menampilkan kutipan** | Transkripsi audio masih berlangsung, atau klip tidak memiliki ucapan yang cukup jelas. Jika sudah punya file `.srt`/`.vtt`, letakkan di sebelah file video dengan nama sama. |
-| **Folder atau file tidak bisa dibuka** | Izin akses bookmark macOS perlu diperbarui — pilih ulang folder tersebut lewat Pengaturan. |
-| **Sebagian file dilewati saat indexing** | Beberapa codec yang tidak didukung decoder bawaan macOS dapat gagal diproses; Carfo mencatat error pada klip tersebut dan tetap melanjutkan file lainnya. |
-| **Adegan sangat singkat terlewat** | Sampel frame diambil secara berkala per segmen video sehingga objek yang muncul kurang dari 1 detik berpotensi terlewat. |
 
 ---
 
